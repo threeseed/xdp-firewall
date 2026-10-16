@@ -29,11 +29,17 @@ All features can be enabled or disabled through the build-time configuration ([`
 
 ### 🌍 IP Range Dropping (CIDR)
 * Block entire **IP subnets** efficiently at the XDP level.
-* Supports **CIDR-based filtering** (e.g., `192.168.1.0/24`).
+* Supports **CIDR-based filtering** for IPv4 (e.g., `192.168.1.0/24`) and IPv6 (e.g., `2001:db8::/32`).
 * Disabled by default but can be enabled in [`config.h`](./src/common/config.h).
 
+### Allowlist (CIDR)
+* IPv4 and IPv6 prefixes that are **always passed**, checked before the block lists, range drop lists and filters.
+* Disabled by default but can be enabled in [`config.h`](./src/common/config.h) (`ENABLE_ALLOWLIST`).
+
 ### 📊 Real-Time Packet Counters
-* Track **allowed, dropped, and passed** packets in real time.
+* Track **allowed, dropped, and passed** packets and **bytes** in real time.
+* Separate counters for block list drops, range drops, allowlist passes and lost filter log events.
+* **Per-filter** packet and byte counters for every filter rule.
 * Supports **per-second statistics** for better traffic analysis.
 
 ### 📜 Logging System
@@ -139,6 +145,7 @@ Additionally, there are command line overrides for base config options you may i
 | -n, --no-stats | `-n 1` | Overrides the config's no stats value. |
 | --stats-ps | `--stats-ps 1` | Overrides the config's stats per second value. |
 | --stdout-ut | `--stdout-ut 500` | Overrides the config's stdout update time value. |
+| --filter-log-consume | `--filter-log-consume 0` | Overrides the config's filter log consume value. |
 
 ## ⚙️ Configuration
 There are two configuration methods for this firewall:
@@ -163,12 +170,14 @@ Here are more details on the layout of the runtime configuration.
 | stats_per_second | bool | `false` | If true, packet counters and stats are calculated per second. `stdout_update_time` must be 1000 or less for this to work properly. |
 | stdout_update_time | int | `1000` | How often to update `stdout` when displaying packet counters in milliseconds. |
 | filters | list of filter objects | `()` | A list of filters to use with the XDP Firewall. |
-| ip_drop_ranges | list of strings | `()` | A list of IP ranges (strings) to drop if the IP range drop feature is enabled. | 
+| filter_log_consume | bool | `true` | Whether the loader consumes the `map_filter_log` ring buffer (filter match logging). A ring buffer has a single consumer, so set this to `false` when another process reads the filter log events from the pinned map. Read at startup only. |
+| ip_drop_ranges | list of strings | `()` | A list of IP ranges (strings) to drop if the IP range drop feature is enabled. IPv4 ranges go to `map_range_drop`, IPv6 ranges (e.g. `2001:db8::/32`) to `map_range_drop6`. Applied at startup. |
+| ip_allow_ranges | list of strings | `()` | A list of IPv4/IPv6 addresses or ranges that are always passed if the allowlist feature (`ENABLE_ALLOWLIST`) is enabled. Applied at startup. |
 
 ### Filter Object
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| enabled | bool | `true` | Whether the rule is enabled or not. |
+| enabled | bool | `true` | Whether the rule is enabled or not. Disabled rules are still written to `map_filters` (with `enabled` cleared) and skipped by the XDP program, so they keep their slot. |
 | log | bool | `false` | Whether to log packets that are matched. |
 | action | int | `1` | The value of `0` drops or blocks the packet while `1` allows/passes the packet through. |
 | block_time | int | `1` | The amount of seconds to block the source IP for if matched. |
@@ -182,8 +191,8 @@ Here are more details on the layout of the runtime configuration.
 | ---- | ---- | ------- | ----------- |
 | src_ip | string | `NULL` | The source IPv4 address to match (e.g. `10.50.0.3`). CIDRs are also supported (e.g. `10.50.0.0/24`)! |
 | dst_ip | string | `NULL` | The destination IPv4 address to match (e.g. `10.50.0.4`). CIDRs are also supported (e.g. `10.50.0.0/24`)! |
-| src_ip6 | string | `NULL` | The source IPv6 address to match (e.g. `fe80::18c4:dfff:fe70:d8a6`). |
-| dst_ip6 | string | `NULL` | The destination IPv6 address to match (e.g. `fe80::ac21:14ff:fe4b:3a6d`). |
+| src_ip6 | string | `NULL` | The source IPv6 address to match (e.g. `fe80::18c4:dfff:fe70:d8a6`). Prefixes are also supported (e.g. `2001:db8::/32`). |
+| dst_ip6 | string | `NULL` | The destination IPv6 address to match (e.g. `fe80::ac21:14ff:fe4b:3a6d`). Prefixes are also supported (e.g. `2001:db8::/32`). |
 | min_ttl | int | `NULL` | The minimum TTL (time-to-live) to match. |
 | max_ttl | int | `NULL` | The maximum TTL (time-to-live) to match. |
 | min_len | int | `NULL` | The minimum packet length to match (includes the entire packet including the ethernet header and payload). |
@@ -229,6 +238,8 @@ You may additionally specified UDP header options for a filter rule which start 
 * When a setting field inside of a filter rule is not set or if it's set to `-1` (or `NULL`), the default setting value will be used (see [`set_filter_defaults()`](https://github.com/gamemann/XDP-Firewall/blob/master/src/loader/utils/config.c#L1047)).
 * When a filter rule's setting is set, but doesn't match the packet, the program moves onto the next filter rule. Therefore, all of the filter rule's settings that are set must match the packet in order to perform the action specified. Think of it as something like `if src_ip == "10.50.0.3" and udp_dport == 27015: action`. 
 * As of right now, you can specify up to **1000 total** dynamic filter rules. You may increase this limit by raising the `MAX_FILTERS` constant in the `src/common/config.h` [file](https://github.com/gamemann/XDP-Firewall/blob/master/src/common/config.h#L5) and then recompile the firewall.
+* IPv6 prefix lengths are stored in `filter_t`'s `ip.src_cidr6`/`ip.dst_cidr6`. `0` and `128` both mean an exact match (so filters written by programs that don't know these fields keep matching exactly); `1` to `127` match the prefix.
+* Every filter has packet and byte counters in the `map_filter_stats` BPF map (indexed by the same slot as `map_filters`), whether or not the filter logs.
 * At this time, each port value supports a single port range per filter rule. This is because adding support for multiple ports/port ranges would require an additional `for` loop which would make the BPF program larger and result in slower performance, etc.
 
 ### Runtime Example
@@ -273,7 +284,8 @@ filters = (
     }
 );
 
-ip_drop_ranges = ( "192.168.1.0/24", "10.3.0.0/24" );
+ip_drop_ranges = ( "192.168.1.0/24", "10.3.0.0/24", "2001:db8:dead::/48" );
+ip_allow_ranges = ( "10.0.0.0/8", "fd00::/8" );
 ```
 
 ## 🔧 The `xdpfw-add` & `xdpfw-del` Utilities
@@ -286,10 +298,10 @@ The following general CLI arguments are supported with these utilities.
 | ---- | ------- | ----------- |
 | -c, --cfg | `-c ./local/conf` | The path to the configuration file (required if the save argument is specified or if you're using dynamic filters mode). |
 | -s, --save | `-s` | Updates the runtime config file. |
-| -m, --mode | `-m 1` | The mode to use (0 = dynamic filters, 1 = IP range drop list, 2 = source IP block list). |
+| -m, --mode | `-m 1` | The mode to use (0 = dynamic filters, 1 = IP range drop list, 2 = source IP block list, 3 = allowlist). |
 | -i, --idx | `-i 3` | The index to update or delete when running in filters mode. |
-| -d, --ip | `-d 192.168.1.0/24` | The IP range or source IP when running in IP range drop list or source IP block list modes. |
-| -v, --v6 | `-v` | Parses and adds the IP address as IPv6 when running in source IP block list mode. |
+| -d, --ip | `-d 192.168.1.0/24` | The IP range or source IP when running in IP range drop list, source IP block list or allowlist modes. IPv6 addresses (containing `:`) use the IPv6 maps. |
+| -v, --v6 | `-v` | Parses the IP address as IPv6 (implied when the address contains `:`). |
 
 ### The `xdpfw-add` Tool
 This CLI tool allows you to add dynamic rules, IP ranges to the drop list, and source IPs to the block list. I'd recommend using `xdpfw-add -h` for more information.
@@ -299,15 +311,15 @@ The following CLI arguments are supported.
 
 | Name | Example | Description |
 | ---- | ------- | ----------- |
-| -e, --expires | `-e 60` | When the source IP block expires in seconds when running in IP block list mode. |
+| -e, --expires | `-e 60` | When the source IP block expires in seconds when running in IP block list mode. If unset or `0`, the block is permanent and goes to `map_block_perm`/`map_block6_perm`. |
 | --enabled | `--enabled 0` | Enables or disables dynamic filter. |
 | --action | `--action 1` | The action to perform on packets that match the filter (0 = drop, 1 = allow). |
 | --log | `--log 1` | Enables or disables logging for the dynamic filter. |
 | --block-time | `--block-time 60` | How long to block the source IP for if the packet is matched and the action is drop in the dynamic filter (0 = no time). | 
 | --sip | `--sip 192.168.1.0/24` | The source IPv4 address/range to match with the dynamic filter. |
 | --dip | `--dip 10.90.0.0/24` | The destination IPv4 address/range to match with the dynamic filter. |
-| --sip6 | `--sip6 192.168.1.0/24` | The source IPv6 address to match with the dynamic filter. |
-| --dip6 | `--dip6 192.168.1.0/24` | The destination IPv6 address to match with the dynamic filter. |
+| --sip6 | `--sip6 2001:db8::/32` | The source IPv6 address/prefix to match with the dynamic filter. |
+| --dip6 | `--dip6 2001:db8::1` | The destination IPv6 address/prefix to match with the dynamic filter. |
 | --min-ttl | `--min-ttl 0` | The IP's minimum TTL to match with the dynamic filter. |
 | --max-ttl | `--max-ttl 6` | The IP's maximum TTL to match with the dynamic filter. |
 | --min-len | `--min-len 42` | The packet's mimimum length to match with the dynamic filter. |
@@ -336,9 +348,34 @@ The following CLI arguments are supported.
 | --type | `--type 8` | The ICMP type to match with the dynamic filter. |
 
 ### The `xdpfw-del` Tool
-This CLI tool allows you to delete dynamic rules, IP ranges from the drop list, and source IPs from the block list.
+This CLI tool allows you to delete dynamic rules, IP ranges from the drop list and allowlist, and source IPs from the block list (both the temporary and the permanent block maps).
 
 There is no additional CLI usage for this tool. Please refer to the general CLI usage above.
+
+## BPF Maps
+When `pin_maps` is enabled, the following maps are pinned to `/sys/fs/bpf/xdpfw/[map_name]`. Addresses are always stored as the raw address bytes in network byte order.
+
+| Map | Type | Key | Value | Max entries | Enabled by |
+| --- | ---- | --- | ----- | ----------- | ---------- |
+| `map_stats` | per-CPU array | `u32` (0) | `stats_t` | 1 | always |
+| `map_block` | LRU hash | `u32` IPv4 | `u64` expiry | `MAX_BLOCK` | always |
+| `map_block_perm` | hash | `u32` IPv4 | `u64` expiry | `MAX_BLOCK_PERM` | always |
+| `map_block6` | LRU hash | `u128` IPv6 | `u64` expiry | `MAX_BLOCK` | `ENABLE_IPV6` |
+| `map_block6_perm` | hash | `u128` IPv6 | `u64` expiry | `MAX_BLOCK_PERM` | `ENABLE_IPV6` |
+| `map_range_drop` | LPM trie | `lpm_trie_key_t` | `u64` (netmask << 32 \| network) | `MAX_IP_RANGES` | `ENABLE_IP_RANGE_DROP` |
+| `map_range_drop6` | LPM trie | `lpm_trie_key6_t` | `u64` (not read by XDP) | `MAX_IP_RANGES6` | `ENABLE_IP_RANGE_DROP` + `ENABLE_IPV6` |
+| `map_allow` | LPM trie | `lpm_trie_key_t` | `u64` (not read by XDP) | `MAX_ALLOW_RANGES` | `ENABLE_ALLOWLIST` |
+| `map_allow6` | LPM trie | `lpm_trie_key6_t` | `u64` (not read by XDP) | `MAX_ALLOW_RANGES` | `ENABLE_ALLOWLIST` + `ENABLE_IPV6` |
+| `map_filters` | per-CPU array | `u32` slot | `filter_t` | `MAX_FILTERS` | `ENABLE_FILTERS` |
+| `map_filter_stats` | per-CPU array | `u32` slot | `filter_stats_t` (`packets`, `bytes`) | `MAX_FILTERS` | `ENABLE_FILTERS` |
+| `map_filter_log` | ring buffer | - | `filter_log_event_t` | 64 KiB | `ENABLE_FILTERS` + `ENABLE_FILTER_LOGGING` |
+
+Notes:
+* The order of checks in the XDP program is: allowlist, block maps (permanent, then LRU), range drop maps, filters.
+* A block map value is the `CLOCK_MONOTONIC` time in nanoseconds (what `bpf_ktime_get_ns()` returns) after which the block expires, or `0` for a permanent block. Expired entries are deleted lazily on the next packet. Use the permanent (non-LRU) maps for bans that must never be evicted.
+* The `map_block6`/`map_block6_perm` key is the 16 address bytes copied into a `u128` (i.e. `memcpy`), not the numeric value of the address.
+* `stats_t` keeps its original `allowed`, `dropped` and `passed` fields first. Appended after them are the byte counters (`allowed_bytes`, `dropped_bytes`, `passed_bytes`), `dropped_block`/`dropped_block_bytes` (block map drops, needs `DO_STATS_ON_BLOCK_MAP`), `dropped_range`/`dropped_range_bytes` (range drops, needs `DO_STATS_ON_IP_RANGE_DROP_MAP`), `allowlist_passed`/`allowlist_passed_bytes` (also counted in `allowed`) and `filter_log_lost` (filter log events lost because the ring buffer was full).
+* Filter log events carry the full 16-byte IPv6 source and destination addresses (`src_ip6`/`dst_ip6`); for IPv4 packets those are zero and `src_ip`/`dst_ip` are set.
 
 ## 📝 Notes
 ### XDP Attach Modes
@@ -397,6 +434,10 @@ I recommend only enabling filter logging at this time for debugging. If you'd li
 ```
 
 I will most likely implement functionality to rate limit log messages from XDP in the future.
+
+Events that cannot be queued because the ring buffer is full are counted in the `filter_log_lost` field of `map_stats`.
+
+If another process should receive the filter log events (for example, a program reading the pinned `map_filter_log` map), set `filter_log_consume = false` in the runtime config (or pass `--filter-log-consume 0`). A ring buffer has a single consumer; two readers split the events between them.
 
 ### LibBPF Logging
 When loading the BPF/XDP program through LibXDP/LibBPF, logging is disabled unless if the `verbose` log setting is set to `5` or higher.
