@@ -360,12 +360,27 @@ int parse_cfg(config__t *cfg, const char* data, config_overrides_t* overrides)
         }
     }
 
+    // Filter log consume.
+    int filter_log_consume;
+
+    if (config_lookup_bool(&conf, "filter_log_consume", &filter_log_consume) == CONFIG_TRUE || (overrides && overrides->filter_log_consume > -1))
+    {
+        if (overrides && overrides->filter_log_consume > -1)
+        {
+            cfg->filter_log_consume = overrides->filter_log_consume;
+        }
+        else
+        {
+            cfg->filter_log_consume = filter_log_consume;
+        }
+    }
+
     // Read filters.
     setting = config_lookup(&conf, "filters");
 
     if (setting && config_setting_is_list(setting))
     {
-        for (int i = 0; i < config_setting_length(setting); i++)
+        for (int i = 0; i < config_setting_length(setting) && i < MAX_FILTERS; i++)
         {
             filter_rule_cfg_t* filter = &cfg->filters[i];
 
@@ -769,6 +784,32 @@ int parse_cfg(config__t *cfg, const char* data, config_overrides_t* overrides)
         }
     }
 
+    // Read IP allow ranges (allowlist).
+    setting = config_lookup(&conf, "ip_allow_ranges");
+
+    if (setting && config_setting_is_list(setting))
+    {
+        for (int i = 0; i < config_setting_length(setting) && i < MAX_ALLOW_RANGES; i++)
+        {
+            if (cfg->allow_ranges[i])
+            {
+                free(cfg->allow_ranges[i]);
+                cfg->allow_ranges[i] = NULL;
+            }
+
+            const char* new_range = config_setting_get_string_elem(setting, i);
+
+            if (!new_range)
+            {
+                continue;
+            }
+
+            cfg->allow_ranges[i] = strdup(new_range);
+
+            cfg->allow_ranges_cnt++;
+        }
+    }
+
     config_destroy(&conf);
 
     return EXIT_SUCCESS;
@@ -854,6 +895,10 @@ int save_cfg(config__t* cfg, const char* file_path)
     // Add stdout update time.
     setting = config_setting_add(root, "stdout_update_time", CONFIG_TYPE_INT);
     config_setting_set_int(setting, cfg->stdout_update_time);
+
+    // Add filter log consume.
+    setting = config_setting_add(root, "filter_log_consume", CONFIG_TYPE_BOOL);
+    config_setting_set_bool(setting, cfg->filter_log_consume);
 
     // Add filters.
     config_setting_t* filters = config_setting_add(root, "filters", CONFIG_TYPE_LIST);
@@ -1136,6 +1181,27 @@ int save_cfg(config__t* cfg, const char* file_path)
         }
     }
 
+    // Add IP allow ranges.
+    config_setting_t* ip_allow_ranges = config_setting_add(root, "ip_allow_ranges", CONFIG_TYPE_LIST);
+
+    if (ip_allow_ranges)
+    {
+        for (int i = 0; i < MAX_ALLOW_RANGES; i++)
+        {
+            const char* range = cfg->allow_ranges[i];
+
+            if (range)
+            {
+                config_setting_t* elem = config_setting_add(ip_allow_ranges, NULL, CONFIG_TYPE_STRING);
+
+                if (elem)
+                {
+                    config_setting_set_string(elem, range);
+                }
+            }
+        }
+    }
+
     // Write config to file.
     file = fopen(file_path, "w");
 
@@ -1273,6 +1339,7 @@ void set_cfg_defaults(config__t* cfg)
     cfg->no_stats = 0;
     cfg->stats_per_second = 0;
     cfg->stdout_update_time = 1000;
+    cfg->filter_log_consume = 1;
 
     if (cfg->log_file)
     {
@@ -1322,6 +1389,22 @@ void set_cfg_defaults(config__t* cfg)
         free(drop_range);
 
         cfg->drop_ranges[i] = NULL;
+    }
+
+    cfg->allow_ranges_cnt = 0;
+
+    for (int i = 0; i < MAX_ALLOW_RANGES; i++)
+    {
+        char* allow_range = cfg->allow_ranges[i];
+
+        if (!allow_range)
+        {
+            continue;
+        }
+
+        free(allow_range);
+
+        cfg->allow_ranges[i] = NULL;
     }
 }
 
@@ -1474,7 +1557,8 @@ void print_cfg(config__t* cfg)
     printf("\tUpdate Time => %d\n", cfg->update_time);
     printf("\tNo Stats => %d\n", cfg->no_stats);
     printf("\tStats Per Second => %d\n", cfg->stats_per_second);
-    printf("\tStdout Update Time => %d\n\n", cfg->stdout_update_time);
+    printf("\tStdout Update Time => %d\n", cfg->stdout_update_time);
+    printf("\tFilter Log Consume => %d\n\n", cfg->filter_log_consume);
 
     printf("Interfaces\n");
     
@@ -1544,6 +1628,27 @@ void print_cfg(config__t* cfg)
     {
         printf("\t- None\n");
     }
+
+    printf("\nIP Allow Ranges\n");
+
+    if (cfg->allow_ranges_cnt > 0)
+    {
+        for (int i = 0; i < cfg->allow_ranges_cnt; i++)
+        {
+            const char* range = cfg->allow_ranges[i];
+    
+            if (!range)
+            {
+                continue;
+            }
+
+            printf("\t- %s\n", range);
+        }
+    }
+    else
+    {
+        printf("\t- None\n");
+    }
 }
 
 /**
@@ -1582,6 +1687,30 @@ int get_next_ip_drop_range_idx(config__t* cfg)
     for (int i = 0; i < MAX_IP_RANGES; i++)
     {
         const char* range = cfg->drop_ranges[i];
+
+        if (range)
+        {
+            continue;
+        }
+
+        return i;
+    }
+
+    return -1;
+}
+
+/**
+ * Retrieves the next available IP allow range index.
+ * 
+ * @param cfg A pointer to the config structure.
+ * 
+ * @return The next available index or -1 if there are no available indexes.
+ */
+int get_next_ip_allow_range_idx(config__t* cfg)
+{
+    for (int i = 0; i < MAX_ALLOW_RANGES; i++)
+    {
+        const char* range = cfg->allow_ranges[i];
 
         if (range)
         {

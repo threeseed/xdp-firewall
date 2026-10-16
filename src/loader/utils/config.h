@@ -95,14 +95,23 @@ struct config
     unsigned int stats_per_second : 1;
     int stdout_update_time;
 
+    // Whether the loader consumes (polls) the map_filter_log ring buffer.
+    // A ring buffer has a single consumer, so set this to false when another process reads filter log events.
+    unsigned int filter_log_consume : 1;
+
     int interfaces_cnt;
     char* interfaces[MAX_INTERFACES];
 
     int filters_cnt;
     filter_rule_cfg_t filters[MAX_FILTERS];
     
+    // IPv4 and IPv6 drop ranges ("a.b.c.d/len" go to map_range_drop, "addr6/len" to map_range_drop6).
     int drop_ranges_cnt;
     char* drop_ranges[MAX_IP_RANGES];
+
+    // IPv4 and IPv6 allowlist entries ("a.b.c.d[/len]" go to map_allow, "addr6[/len]" to map_allow6).
+    int allow_ranges_cnt;
+    char* allow_ranges[MAX_ALLOW_RANGES];
 } typedef config__t; // config_t is taken by libconfig -.-
 
 struct config_overrides
@@ -115,6 +124,7 @@ struct config_overrides
     int no_stats;
     int stats_per_second;
     int stdout_update_time;
+    int filter_log_consume;
 } typedef config_overrides_t;
 
 void set_cfg_defaults(config__t *cfg);
@@ -133,5 +143,6 @@ int parse_cfg(config__t *cfg, const char* data, config_overrides_t* overrides);
 
 int get_next_filter_idx(config__t* cfg);
 int get_next_ip_drop_range_idx(config__t* cfg);
+int get_next_ip_allow_range_idx(config__t* cfg);
 
 #include <loader/utils/logging.h>

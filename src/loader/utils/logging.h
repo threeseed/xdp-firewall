@@ -9,6 +9,7 @@
 #include <common/all.h>
 
 #include <loader/utils/config.h>
+#include <loader/utils/xdp.h>
 
 #include <xdp/libxdp.h>
 

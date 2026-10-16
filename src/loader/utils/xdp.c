@@ -199,11 +199,16 @@ int attach_xdp(struct xdp_program *prog, char** mode, int ifidx, int detach, int
  * @param map_filters The filters BPF map FD.
  * @param idx The filter index to delete.
  * 
- * @return 0 on success or the error value of bpf_map_delete_elem().
+ * @return 0 on success or the error value of bpf_map_update_elem().
  */
 int delete_filter(int map_filters, u32 idx)
 {
-    return bpf_map_delete_elem(map_filters, &idx);
+    // map_filters is an array map, whose elements cannot be deleted (bpf_map_delete_elem() returns -EINVAL).
+    // Clear the slot instead; the XDP program stops at the first slot that is not set.
+    filter_t filter_cpus[MAX_CPUS];
+    memset(filter_cpus, 0, sizeof(filter_cpus));
+
+    return bpf_map_update_elem(map_filters, &idx, &filter_cpus, BPF_ANY);
 }
 
 /**
@@ -236,15 +241,8 @@ int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
 
     filter.set = filter_cfg->set;
 
-    if (!filter_cfg->enabled)
-    {
-        return 0;
-    }
-    
-    if (filter_cfg->enabled > -1)
-    {
-        filter.enabled = filter_cfg->enabled;
-    }
+    // Disabled filters are written too (enabled = 0); the XDP program skips them, so they keep their slot.
+    filter.enabled = (filter_cfg->enabled != 0) ? 1 : 0;
 
     if (filter_cfg->log > -1)
     {
@@ -310,22 +308,39 @@ int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
     }
 
 #ifdef ENABLE_IPV6
+    // IPv6 addresses accept "addr" (exact, stored as /128) or "addr/len" (prefix match).
     if (filter_cfg->ip.src_ip6)
     {
-        struct in6_addr in;
+        ip6_range_t range = parse_ip6_range(filter_cfg->ip.src_ip6);
 
-        inet_pton(AF_INET6, filter_cfg->ip.src_ip6, &in);
+        if (!range.success)
+        {
+            fprintf(stderr, "[WARNING] Invalid source IPv6 address '%s' for filter #%d...\n", filter_cfg->ip.src_ip6, idx + 1);
+        }
+        else
+        {
+            mask_ip6(range.ip, range.cidr);
 
-        memcpy(filter.ip.src_ip6, in.__in6_u.__u6_addr32, 4);
+            memcpy(filter.ip.src_ip6, range.ip, sizeof(filter.ip.src_ip6));
+            filter.ip.src_cidr6 = range.cidr;
+        }
     }
 
     if (filter_cfg->ip.dst_ip6)
     {
-        struct in6_addr in;
+        ip6_range_t range = parse_ip6_range(filter_cfg->ip.dst_ip6);
 
-        inet_pton(AF_INET6, filter_cfg->ip.dst_ip6, &in);
+        if (!range.success)
+        {
+            fprintf(stderr, "[WARNING] Invalid destination IPv6 address '%s' for filter #%d...\n", filter_cfg->ip.dst_ip6, idx + 1);
+        }
+        else
+        {
+            mask_ip6(range.ip, range.cidr);
 
-        memcpy(filter.ip.dst_ip6, in.__in6_u.__u6_addr32, 4);
+            memcpy(filter.ip.dst_ip6, range.ip, sizeof(filter.ip.dst_ip6));
+            filter.ip.dst_cidr6 = range.cidr;
+        }
     }
 #endif
 
@@ -518,16 +533,13 @@ void update_filters(int map_filters, config__t *cfg)
     int cur_idx = 0;
 
     // Add a filter to the filter maps.
-    for (int i = 0; i < cfg->filters_cnt; i++)
+    // Set filters are written to consecutive slots (unset config entries are skipped, since the XDP program stops at the first unset slot).
+    // Disabled filters are written with enabled = 0 so they keep their slot and the slot numbering matches the order of set filters in the config.
+    for (int i = 0; i < MAX_FILTERS; i++)
     {
-        // Delete previous rule from BPF map.
-        // We do this in the case rules were edited and were put out of order since the key doesn't uniquely map to a specific rule.
-        delete_filter(map_filters, i);
-
         filter_rule_cfg_t* filter = &cfg->filters[i];
 
-        // Only insert set and enabled filters.
-        if (!filter->set || !filter->enabled)
+        if (!filter->set)
         {
             continue;
         }
@@ -542,6 +554,44 @@ void update_filters(int map_filters, config__t *cfg)
 
         cur_idx++;
     }
+
+    // Clear the remaining slots so rules removed from the config don't linger.
+    for (int i = cur_idx; i < MAX_FILTERS; i++)
+    {
+        delete_filter(map_filters, i);
+    }
+}
+
+/**
+ * Retrieves the config filter that a map_filters slot was written from by update_filters().
+ * 
+ * @param cfg A pointer to the config structure.
+ * @param slot The map_filters slot (e.g. filter_id of a filter log event).
+ * 
+ * @return A pointer to the config filter or NULL if not found.
+ */
+filter_rule_cfg_t* get_filter_by_slot(config__t* cfg, int slot)
+{
+    int cur = 0;
+
+    for (int i = 0; i < MAX_FILTERS; i++)
+    {
+        filter_rule_cfg_t* filter = &cfg->filters[i];
+
+        if (!filter->set)
+        {
+            continue;
+        }
+
+        if (cur == slot)
+        {
+            return filter;
+        }
+
+        cur++;
+    }
+
+    return NULL;
 }
 
 /**
@@ -626,7 +676,7 @@ int delete_block(int map_block, u32 ip)
  * 
  * @param map_block The block map's FD.
  * @param ip The IP address to add.
- * @param expires When the block expires (nanoseconds since system boot).
+ * @param expires When the block expires (CLOCK_MONOTONIC nanoseconds, as returned by get_boot_nano_time(); 0 = permanent).
  * 
  * @return 0 on success or error value of bpf_map_update_elem().
  */
@@ -653,7 +703,7 @@ int delete_block6(int map_block6, u128 ip)
  * 
  * @param map_block6 The block map's FD.
  * @param ip The IP address to add.
- * @param expires When the block expires (nanoseconds since system boot).
+ * @param expires When the block expires (CLOCK_MONOTONIC nanoseconds, as returned by get_boot_nano_time(); 0 = permanent).
  * 
  * @return 0 on success or error value of bpf_map_update_elem().
  */
@@ -673,7 +723,7 @@ int add_block6(int map_block6, u128 ip, u64 expires)
  */
 int delete_range_drop(int map_range_drop, u32 net, u8 cidr)
 {
-    u32 bit_mask = htonl(( ~( (1 << (32 - cidr) ) - 1) ));
+    u32 bit_mask = cidr_to_mask(cidr);
     u32 start = net & bit_mask;
 
     lpm_trie_key_t key = {0};
@@ -694,7 +744,7 @@ int delete_range_drop(int map_range_drop, u32 net, u8 cidr)
  */
 int add_range_drop(int map_range_drop, u32 net, u8 cidr)
 {
-    u32 bit_mask = htonl(( ~( (1 << (32 - cidr) ) - 1) ));
+    u32 bit_mask = cidr_to_mask(cidr);
     u32 start = net & bit_mask;
 
     lpm_trie_key_t key = {0};
@@ -707,14 +757,109 @@ int add_range_drop(int map_range_drop, u32 net, u8 cidr)
 }
 
 /**
+ * Builds an IPv6 LPM trie key.
+ * 
+ * @param ip The address (four words, network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return The key with host bits cleared.
+ */
+static lpm_trie_key6_t make_lpm_key6(const u32* ip, u8 cidr)
+{
+    lpm_trie_key6_t key = {0};
+
+    if (cidr > 128)
+    {
+        cidr = 128;
+    }
+
+    key.prefix_len = cidr;
+    memcpy(key.data, ip, sizeof(key.data));
+
+    mask_ip6(key.data, cidr);
+
+    return key;
+}
+
+/**
+ * Deletes an IPv6 range from the IPv6 drop map.
+ * 
+ * @param map_range_drop6 The IPv6 range drop map's FD.
+ * @param net The network address (four words, network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_delete_elem().
+ */
+int delete_range_drop6(int map_range_drop6, const u32* net, u8 cidr)
+{
+    lpm_trie_key6_t key = make_lpm_key6(net, cidr);
+
+    return bpf_map_delete_elem(map_range_drop6, &key);
+}
+
+/**
+ * Adds an IPv6 range to the IPv6 drop map.
+ * 
+ * @param map_range_drop6 The IPv6 range drop map's FD.
+ * @param net The network address (four words, network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_update_elem().
+ */
+int add_range_drop6(int map_range_drop6, const u32* net, u8 cidr)
+{
+    lpm_trie_key6_t key = make_lpm_key6(net, cidr);
+
+    // The value is not read by the XDP program; store the prefix length for readers.
+    u64 val = key.prefix_len;
+
+    return bpf_map_update_elem(map_range_drop6, &key, &val, BPF_ANY);
+}
+
+/**
+ * Adds an IP range string (IPv4 or IPv6, with optional "/len") to the matching LPM map pair.
+ * 
+ * @param map4 The IPv4 map FD (or -1).
+ * @param map6 The IPv6 map FD (or -1).
+ * @param range The range string.
+ * @param is_drop 1 for the range drop maps (map_range_drop value layout), 0 for the allowlist maps.
+ * 
+ * @return 0 on success, -1 on a parse error or missing map, or the error value of bpf_map_update_elem().
+ */
+static int add_range_str(int map4, int map6, const char* range, int is_drop)
+{
+    if (is_ip6_str(range))
+    {
+        ip6_range_t t = parse_ip6_range(range);
+
+        if (!t.success || map6 < 0)
+        {
+            return -1;
+        }
+
+        return is_drop ? add_range_drop6(map6, t.ip, t.cidr) : add_allow6(map6, t.ip, t.cidr);
+    }
+
+    if (map4 < 0)
+    {
+        return -1;
+    }
+
+    ip_range_t t = parse_ip_range(range);
+
+    return is_drop ? add_range_drop(map4, t.ip, t.cidr) : add_allow(map4, t.ip, t.cidr);
+}
+
+/**
  * Updates IP ranges from config file.
  * 
- * @param map_range_drop The IPv4 range drop map's FD.
+ * @param map_range_drop The IPv4 range drop map's FD (or -1).
+ * @param map_range_drop6 The IPv6 range drop map's FD (or -1).
  * @param cfg A pointer to the config file
  * 
  * @return void
  */
-void update_range_drops(int map_range_drop, config__t* cfg)
+void update_range_drops(int map_range_drop, int map_range_drop6, config__t* cfg)
 {
     for (int i = 0; i < MAX_IP_RANGES; i++)
     {
@@ -725,9 +870,126 @@ void update_range_drops(int map_range_drop, config__t* cfg)
             continue;
         }
 
-        // Parse IP range string and return network IP and CIDR.
-        ip_range_t t = parse_ip_range(range);
-
-        add_range_drop(map_range_drop, t.ip, t.cidr);
+        if (add_range_str(map_range_drop, map_range_drop6, range, 1) != 0)
+        {
+            fprintf(stderr, "[WARNING] Failed to add IP drop range '%s'...\n", range);
+        }
     }
+}
+
+/**
+ * Deletes an IPv4 range from the allowlist.
+ * 
+ * @param map_allow The IPv4 allowlist map's FD.
+ * @param net The network IP (network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_delete_elem().
+ */
+int delete_allow(int map_allow, u32 net, u8 cidr)
+{
+    lpm_trie_key_t key = {0};
+    key.prefix_len = cidr > 32 ? 32 : cidr;
+    key.data = net & cidr_to_mask(cidr);
+
+    return bpf_map_delete_elem(map_allow, &key);
+}
+
+/**
+ * Adds an IPv4 range to the allowlist.
+ * 
+ * @param map_allow The IPv4 allowlist map's FD.
+ * @param net The network IP (network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_update_elem().
+ */
+int add_allow(int map_allow, u32 net, u8 cidr)
+{
+    lpm_trie_key_t key = {0};
+    key.prefix_len = cidr > 32 ? 32 : cidr;
+    key.data = net & cidr_to_mask(cidr);
+
+    // The value is not read by the XDP program; store the prefix length for readers.
+    u64 val = key.prefix_len;
+
+    return bpf_map_update_elem(map_allow, &key, &val, BPF_ANY);
+}
+
+/**
+ * Deletes an IPv6 range from the allowlist.
+ * 
+ * @param map_allow6 The IPv6 allowlist map's FD.
+ * @param net The network address (four words, network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_delete_elem().
+ */
+int delete_allow6(int map_allow6, const u32* net, u8 cidr)
+{
+    lpm_trie_key6_t key = make_lpm_key6(net, cidr);
+
+    return bpf_map_delete_elem(map_allow6, &key);
+}
+
+/**
+ * Adds an IPv6 range to the allowlist.
+ * 
+ * @param map_allow6 The IPv6 allowlist map's FD.
+ * @param net The network address (four words, network byte order).
+ * @param cidr The prefix length.
+ * 
+ * @return 0 on success or error value of bpf_map_update_elem().
+ */
+int add_allow6(int map_allow6, const u32* net, u8 cidr)
+{
+    lpm_trie_key6_t key = make_lpm_key6(net, cidr);
+
+    u64 val = key.prefix_len;
+
+    return bpf_map_update_elem(map_allow6, &key, &val, BPF_ANY);
+}
+
+/**
+ * Updates the allowlist maps from the config file.
+ * 
+ * @param map_allow The IPv4 allowlist map's FD (or -1).
+ * @param map_allow6 The IPv6 allowlist map's FD (or -1).
+ * @param cfg A pointer to the config structure.
+ * 
+ * @return void
+ */
+void update_allow_ranges(int map_allow, int map_allow6, config__t* cfg)
+{
+    for (int i = 0; i < MAX_ALLOW_RANGES; i++)
+    {
+        const char* range = cfg->allow_ranges[i];
+
+        if (!range)
+        {
+            continue;
+        }
+
+        if (add_range_str(map_allow, map_allow6, range, 0) != 0)
+        {
+            fprintf(stderr, "[WARNING] Failed to add IP allow range '%s'...\n", range);
+        }
+    }
+}
+
+/**
+ * Converts an IPv6 address to the map_block6/map_block6_perm key.
+ * 
+ * The XDP program memcpy()s the 16 raw source address bytes into its u128 key, so the key is the address bytes in network order, not a numeric (host order) value.
+ * 
+ * @param addr The address.
+ * 
+ * @return The key.
+ */
+u128 ip6_to_block_key(const struct in6_addr* addr)
+{
+    u128 key = 0;
+    memcpy(&key, addr->s6_addr, sizeof(key));
+
+    return key;
 }

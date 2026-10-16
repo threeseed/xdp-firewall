@@ -17,6 +17,7 @@ const struct option opts[] =
     { "no-stats", required_argument, NULL, 'n' },
     { "stats-ps", required_argument, NULL, 1 },
     { "stdout-ut", required_argument, NULL, 2 },
+    { "filter-log-consume", required_argument, NULL, 3 },
 
     { NULL, 0, NULL, 0 }
 };
@@ -104,6 +105,11 @@ void parse_cli(cli_t *cli, int argc, char *argv[])
             case 2:
                 cli->stdout_update_time = atoi(optarg);
                 
+                break;
+
+            case 3:
+                cli->filter_log_consume = atoi(optarg);
+
                 break;
 
             case '?':

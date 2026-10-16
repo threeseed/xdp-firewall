@@ -11,6 +11,8 @@ struct filter_ip
     u8 dst_cidr;
 
 #ifdef ENABLE_IPV6
+    // IPv6 addresses in network byte order (the 16 raw address bytes).
+    // An address is considered set when any of its four words is non-zero.
     u32 src_ip6[4];
     u32 dst_ip6[4];
 #endif
@@ -29,6 +31,15 @@ struct filter_ip
 
     unsigned int do_tos : 1;
     u8 tos;
+
+#ifdef ENABLE_IPV6
+    // IPv6 prefix lengths for src_ip6/dst_ip6.
+    // 0 and 128 both mean an exact (/128) match, so filters written before these fields existed (zeroed) keep matching exactly.
+    // 1-127 match the address as a CIDR prefix (masked compare).
+    // Appended after tos so they occupy what was trailing padding: every older field keeps its offset and sizeof(filter_ip_t) is unchanged.
+    u8 src_cidr6;
+    u8 dst_cidr6;
+#endif
 } typedef filter_ip_t;
 
 struct filter_tcp
@@ -133,12 +144,47 @@ struct filter
     filter_icmp_t icmp;
 } __attribute__((__aligned__(8))) typedef filter_t;
 
+// Global packet counters (map_stats, per-CPU, single entry at key 0).
+// The first three fields are the original layout; every later field was appended so readers of the old prefix keep working.
 struct stats
 {
+    // Packets matched by an allow filter (action 1) or by the allowlist (map_allow/map_allow6).
     u64 allowed;
+
+    // Packets dropped (malformed, block maps, range drop maps and drop filters).
     u64 dropped;
+
+    // Packets passed without matching anything.
     u64 passed;
+
+    // Byte counters for the three counters above (full frame length, data_end - data).
+    u64 allowed_bytes;
+    u64 dropped_bytes;
+    u64 passed_bytes;
+
+    // Subset of dropped: drops because the source was in map_block/map_block6/map_block_perm/map_block6_perm (requires DO_STATS_ON_BLOCK_MAP).
+    u64 dropped_block;
+    u64 dropped_block_bytes;
+
+    // Subset of dropped: drops because the source was in map_range_drop/map_range_drop6 (requires DO_STATS_ON_IP_RANGE_DROP_MAP).
+    u64 dropped_range;
+    u64 dropped_range_bytes;
+
+    // Subset of allowed: passes because the source was in map_allow/map_allow6.
+    u64 allowlist_passed;
+    u64 allowlist_passed_bytes;
+
+    // Filter log events lost because bpf_ringbuf_reserve() on map_filter_log failed (ring buffer full).
+    u64 filter_log_lost;
 } typedef stats_t;
+
+// Per-filter counters (map_filter_stats, per-CPU array indexed by filter slot).
+// Incremented for every packet that matches the filter, whether or not the filter logs.
+struct filter_stats
+{
+    u64 packets;
+    u64 bytes;
+} typedef filter_stats_t;
 
 struct cl_stats
 {
@@ -161,6 +207,9 @@ struct flow6
     u8 protocol;
 } typedef flow6_t;
 
+// Filter log event (map_filter_log ring buffer).
+// For IPv4 packets src_ip/dst_ip are set and src_ip6/dst_ip6 are zero.
+// For IPv6 packets src_ip6/dst_ip6 carry the full 16 address bytes (network byte order) and src_ip/dst_ip are zero.
 struct filter_log_event
 {
     u64 ts;
@@ -187,8 +236,19 @@ struct filter_log_event
     u64 flow_bps;
 } typedef filter_log_event_t;
 
+// IPv4 LPM trie key (map_range_drop, map_allow).
+// data is the network address in network byte order.
 struct lpm_trie_key
 {
     u32 prefix_len;
     u32 data;
 } typedef lpm_trie_key_t;
+
+// IPv6 LPM trie key (map_range_drop6, map_allow6).
+// data is the 16 raw address bytes in network byte order; prefix_len is 0-128.
+// u32[4] rather than u128 so there is no alignment padding between prefix_len and data (the kernel requires data at offset 4).
+struct lpm_trie_key6
+{
+    u32 prefix_len;
+    u32 data[4];
+} typedef lpm_trie_key6_t;

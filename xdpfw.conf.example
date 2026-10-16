@@ -6,9 +6,18 @@ no_stats = false;
 stats_per_second = false;
 stdout_update_time = 1000;
 
+# Set to false if another process consumes the map_filter_log ring buffer.
+filter_log_consume = true;
+
 filters = (
     {
         enabled = true,
         action = 1
     }
 );
+
+# IPv4 and IPv6 ranges to drop (requires ENABLE_IP_RANGE_DROP in config.h).
+ip_drop_ranges = ( );
+
+# IPv4 and IPv6 addresses/ranges that are always passed (requires ENABLE_ALLOWLIST in config.h).
+ip_allow_ranges = ( );

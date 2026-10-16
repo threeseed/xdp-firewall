@@ -27,10 +27,28 @@ static __always_inline int log_filter_msg(struct iphdr* iph, struct ipv6hdr* iph
 {
     filter_log_event_t* e = bpf_ringbuf_reserve(&map_filter_log, sizeof(*e), 0);
 
-    if (e)
+    if (!e)
+    {
+        // The ring buffer is full (or the consumer is too slow). Count the lost event so userspace can see it.
+        u32 key = 0;
+        stats_t* stats = bpf_map_lookup_elem(&map_stats, &key);
+
+        if (stats)
+        {
+            stats->filter_log_lost++;
+        }
+    }
+    else
     {
         e->ts = now;
         e->filter_id = filter_id;
+
+        // Ring buffer memory is not zeroed, so clear the address fields of the family we don't fill.
+        e->src_ip = 0;
+        e->dst_ip = 0;
+
+        __builtin_memset(&e->src_ip6, 0, sizeof(e->src_ip6));
+        __builtin_memset(&e->dst_ip6, 0, sizeof(e->dst_ip6));
 
         if (iph)
         {
@@ -40,8 +58,8 @@ static __always_inline int log_filter_msg(struct iphdr* iph, struct ipv6hdr* iph
 #ifdef ENABLE_IPV6
         else if (iph6)
         {
-            memcpy(&e->src_ip6, iph6->saddr.in6_u.u6_addr32, 4);
-            memcpy(&e->dst_ip6, iph6->daddr.in6_u.u6_addr32, 4);
+            memcpy(&e->src_ip6, iph6->saddr.in6_u.u6_addr32, sizeof(e->src_ip6));
+            memcpy(&e->dst_ip6, iph6->daddr.in6_u.u6_addr32, sizeof(e->dst_ip6));
         }
 #endif
 

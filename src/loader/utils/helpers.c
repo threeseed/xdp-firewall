@@ -22,6 +22,7 @@ void print_help_menu()
     printf("  -n, --no-stats       Override config's no stats value.\n");
     printf("      --stats-ps       Override config's stats per second value.\n");
     printf("      --stdout-ut      Override config's stdout update time value.\n");
+    printf("      --filter-log-consume  Override config's filter log consume value (0 = leave map_filter_log to another consumer).\n");
 }
 
 /**
@@ -70,6 +71,122 @@ ip_range_t parse_ip_range(const char *ip)
 }
 
 /**
+ * Converts an IPv4 prefix length to a netmask in network byte order.
+ * 
+ * @param cidr The prefix length (0-32).
+ * 
+ * @return The netmask in network byte order.
+ */
+u32 cidr_to_mask(u8 cidr)
+{
+    if (cidr == 0)
+    {
+        return 0;
+    }
+
+    if (cidr >= 32)
+    {
+        return 0xFFFFFFFFu;
+    }
+
+    return htonl(0xFFFFFFFFu << (32 - cidr));
+}
+
+/**
+ * Checks whether an address string looks like an IPv6 address (contains ':').
+ * 
+ * @param ip The address string.
+ * 
+ * @return 1 on yes, 0 on no.
+ */
+int is_ip6_str(const char* ip)
+{
+    return ip && strchr(ip, ':') != NULL;
+}
+
+/**
+ * Clears the host bits of an IPv6 address.
+ * 
+ * @param ip The address (four words, network byte order).
+ * @param cidr The prefix length (0-128).
+ * 
+ * @return void
+ */
+void mask_ip6(u32* ip, u8 cidr)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        int bits = (int)cidr - (i * 32);
+
+        if (bits >= 32)
+        {
+            continue;
+        }
+
+        if (bits <= 0)
+        {
+            ip[i] = 0;
+
+            continue;
+        }
+
+        ip[i] &= htonl(0xFFFFFFFFu << (32 - bits));
+    }
+}
+
+/**
+ * Parses an IPv6 address string with optional prefix length ("addr" or "addr/len").
+ * 
+ * @param ip The address string.
+ * 
+ * @return The parsed address and prefix length. success is 0 if the address or prefix length is invalid.
+ */
+ip6_range_t parse_ip6_range(const char* ip)
+{
+    ip6_range_t ret = {0};
+    ret.cidr = 128;
+
+    if (!ip)
+    {
+        return ret;
+    }
+
+    char ip_copy[INET6_ADDRSTRLEN + 5];
+    strncpy(ip_copy, ip, sizeof(ip_copy) - 1);
+    ip_copy[sizeof(ip_copy) - 1] = '\0';
+
+    char* slash = strchr(ip_copy, '/');
+
+    if (slash)
+    {
+        *slash = '\0';
+
+        char* end = NULL;
+        unsigned long len = strtoul(slash + 1, &end, 10);
+
+        if (end == slash + 1 || *end != '\0' || len > 128)
+        {
+            return ret;
+        }
+
+        ret.cidr = (u8)len;
+    }
+
+    struct in6_addr addr;
+
+    if (inet_pton(AF_INET6, ip_copy, &addr) != 1)
+    {
+        return ret;
+    }
+
+    memcpy(ret.ip, &addr, sizeof(ret.ip));
+
+    ret.success = 1;
+
+    return ret;
+}
+
+/**
  * Retrieves protocol name by ID.
  * 
  * @param id The protocol ID
@@ -88,6 +205,9 @@ const char* get_protocol_str_by_id(int id)
         
         case IPPROTO_ICMP:
             return "ICMP";
+
+        case IPPROTO_ICMPV6:
+            return "ICMPv6";
     }
 
     return "N/A";
@@ -111,16 +231,19 @@ void print_tool_info()
 }
 
 /**
- * Retrieves nanoseconds since system boot.
+ * Retrieves the current CLOCK_MONOTONIC time in nanoseconds.
  * 
- * @return The current nanoseconds since the system last booted.
+ * This is the clock bpf_ktime_get_ns() reads in the XDP program, so block expiry times computed from it compare correctly there.
+ * (The previous implementation used sysinfo().uptime, which has one second resolution and is CLOCK_BOOTTIME based.)
+ * 
+ * @return The current CLOCK_MONOTONIC time in nanoseconds.
  */
 u64 get_boot_nano_time()
 {
-    struct sysinfo sys;
-    sysinfo(&sys);
+    struct timespec ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
 
-    return sys.uptime * 1e9;
+    return ((u64)ts.tv_sec * 1000000000ULL) + (u64)ts.tv_nsec;
 }
 
 /**

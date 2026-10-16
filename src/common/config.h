@@ -4,12 +4,25 @@
 // Disable this for better performance if you only plan on adding entries to the block and drop maps.
 #define ENABLE_FILTERS
 
-// Enables IPv4 range drop map.
-// Disable this if you don't plan on adding IPv4 ranges to the drop map as it will increase performance.
+// Enables IPv4 range drop map (map_range_drop) and, together with ENABLE_IPV6, the IPv6 range drop map (map_range_drop6).
+// Disable this if you don't plan on adding IP ranges to the drop maps as it will increase performance.
 //#define ENABLE_IP_RANGE_DROP
 
 // The maximum IP ranges supported in the IP range drop map.
 #define MAX_IP_RANGES 4096
+
+// The maximum IPv6 ranges supported in the IPv6 range drop map (map_range_drop6).
+// The IPv6 range drop map exists when both ENABLE_IP_RANGE_DROP and ENABLE_IPV6 are defined.
+#define MAX_IP_RANGES6 4096
+
+// Enables the allowlist maps (map_allow for IPv4 and map_allow6 for IPv6, LPM tries).
+// A source address matching an allowlist entry is passed (XDP_PASS) before the block maps, range drop maps and filters are checked.
+// Disable this if you don't plan on using the allowlist as it will increase performance.
+// Note: deployments that manage the allowlist from another process (e.g. the harana matrix plugin) build with this enabled.
+//#define ENABLE_ALLOWLIST
+
+// The maximum entries in each allowlist map (map_allow and map_allow6).
+#define MAX_ALLOW_RANGES 4096
 
 // The maximum amount of filters allowed.
 // Decrease this value if you receive errors related to the BPF program being too large.
@@ -50,6 +63,10 @@
 
 // Maximum entries in block map.
 #define MAX_BLOCK 100000
+
+// Maximum entries in the permanent block maps (map_block_perm and map_block6_perm).
+// These are plain (non-LRU) hash maps, so permanent bans are never evicted to make room for temporary ones.
+#define MAX_BLOCK_PERM 100000
 
 // Enables IPv6.
 // If you're not using IPv6, this will speed up performance of the XDP program.
