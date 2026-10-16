@@ -134,7 +134,8 @@ int hdl_filters_rb_event(void* ctx, void* data, size_t sz)
     config__t* cfg = (config__t*)ctx;
     filter_log_event_t* e = (filter_log_event_t*)data;
 
-    filter_rule_cfg_t* filter = &cfg->filters[e->filter_id];
+    // filter_id is the map_filters slot, which differs from the config index when the config has unset entries.
+    filter_rule_cfg_t* filter = get_filter_by_slot(cfg, e->filter_id);
 
     if (filter == NULL)
     {
@@ -164,7 +165,7 @@ int hdl_filters_rb_event(void* ctx, void* data, size_t sz)
 
     const char* protocol_str = get_protocol_str_by_id(e->protocol);
 
-    log_msg(cfg, 0, 0, "[FILTER %d] %s %s packet '%s:%d' => '%s:%d' (IP PPS => %llu, IP BPS => %llu, Flow PPS => %llu, Flow BPS => %llu Filter Block Time => %llu, length => %d)...", e->filter_id + 1, action, protocol_str, src_ip_str, htons(e->src_port), dst_ip_str, htons(e->dst_port), e->ip_pps, e->ip_bps, e->flow_pps, e->flow_bps, filter->block_time, e->length);
+    log_msg(cfg, 0, 0, "[FILTER %d] %s %s packet '%s:%d' => '%s:%d' (IP PPS => %llu, IP BPS => %llu, Flow PPS => %llu, Flow BPS => %llu Filter Block Time => %d, length => %d)...", e->filter_id + 1, action, protocol_str, src_ip_str, htons(e->src_port), dst_ip_str, htons(e->dst_port), e->ip_pps, e->ip_bps, e->flow_pps, e->flow_bps, filter->block_time, e->length);
 
     return 0;
 }

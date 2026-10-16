@@ -35,9 +35,27 @@
 #endif
 
 static __always_inline int is_ip_in_range(u32 src_ip, u32 net_ip, u8 cidr);
+static __always_inline int check_block(void *map, const void *key, u64 now);
+
+#ifdef ENABLE_IPV6
+static __always_inline int is_ip6_set(const u32 *ip);
+static __always_inline int is_ip6_in_range(const u32 *src_ip, const u32 *net_ip, u8 cidr);
+#endif
 
 #ifdef ENABLE_IP_RANGE_DROP
 static __always_inline int check_ip_range_drop(u32 ip);
+
+#ifdef ENABLE_IPV6
+static __always_inline int check_ip6_range_drop(const u32 *ip);
+#endif
+#endif
+
+#ifdef ENABLE_ALLOWLIST
+static __always_inline int check_allow(u32 ip);
+
+#ifdef ENABLE_IPV6
+static __always_inline int check_allow6(const u32 *ip);
+#endif
 #endif
 
 // The source file is included directly below instead of compiled and linked as an object because when linking, there is no guarantee the compiler will inline the function (which is crucial for performance).

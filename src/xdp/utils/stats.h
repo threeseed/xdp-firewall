@@ -11,10 +11,17 @@ enum STATS_TYPE
 {
     STATS_TYPE_ALLOWED = 0,
     STATS_TYPE_PASSED,
-    STATS_TYPE_DROPPED
+    STATS_TYPE_DROPPED,
+
+    // Also counted as STATS_TYPE_DROPPED.
+    STATS_TYPE_DROPPED_BLOCK,
+    STATS_TYPE_DROPPED_RANGE,
+
+    // Also counted as STATS_TYPE_ALLOWED.
+    STATS_TYPE_ALLOWED_ALLOWLIST
 } typedef STATS_TYPE_T;
 
-static __always_inline int inc_pkt_stats(stats_t* stats, STATS_TYPE_T type);
+static __always_inline int inc_pkt_stats(stats_t* stats, STATS_TYPE_T type, u64 bytes);
 
 // The source file is included directly below instead of compiled and linked as an object because when linking, there is no guarantee the compiler will inline the function (which is crucial for performance).
 // I'd prefer not to include the function logic inside of the header file.

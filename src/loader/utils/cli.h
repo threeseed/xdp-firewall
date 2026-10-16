@@ -21,6 +21,7 @@ struct cli
     int no_stats;
     int stats_per_second;
     int stdout_update_time;
+    int filter_log_consume;
 } typedef cli_t;
 
 void parse_cli(cli_t *cli, int argc, char *argv[]);

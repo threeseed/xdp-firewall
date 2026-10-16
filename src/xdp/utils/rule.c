@@ -20,6 +20,12 @@ static __always_inline long process_rule(u32 idx, void* data)
         return 1;
     }
 
+    // Disabled filters keep their slot but never match.
+    if (!filter->enabled)
+    {
+        return 0;
+    }
+
 #ifdef ENABLE_RL_IP
     // Check source IP rate limits.
     if (filter->do_ip_pps && ctx->ip_pps < filter->ip_pps)
@@ -90,7 +96,7 @@ static __always_inline long process_rule(u32 idx, void* data)
         }
 
 #if defined(ENABLE_IPV6) && defined(ALLOW_SINGLE_IP_V4_V6)
-        if ((filter->ip.src_ip6[0] != 0 || filter->ip.src_ip6[1] != 0 || filter->ip.src_ip6[2] != 0 || filter->ip.src_ip6[3] != 0) || (filter->ip.dst_ip6[0] != 0 || filter->ip.dst_ip6[1] != 0 || filter->ip.dst_ip6[2] != 0 || filter->ip.dst_ip6[3] != 0))
+        if (is_ip6_set(filter->ip.src_ip6) || is_ip6_set(filter->ip.dst_ip6))
         {
             return 0;
         }
@@ -117,14 +123,14 @@ static __always_inline long process_rule(u32 idx, void* data)
 #ifdef ENABLE_IPV6
     else if (ctx->iph6)
     {
-        // Source address.
-        if (filter->ip.src_ip6[0] != 0 && (ctx->iph6->saddr.in6_u.u6_addr32[0] != filter->ip.src_ip6[0] || ctx->iph6->saddr.in6_u.u6_addr32[1] != filter->ip.src_ip6[1] || ctx->iph6->saddr.in6_u.u6_addr32[2] != filter->ip.src_ip6[2] || ctx->iph6->saddr.in6_u.u6_addr32[3] != filter->ip.src_ip6[3]))
+        // Source address (src_cidr6 0 or 128 = exact match, 1-127 = prefix match).
+        if (is_ip6_set(filter->ip.src_ip6) && !is_ip6_in_range(ctx->iph6->saddr.in6_u.u6_addr32, filter->ip.src_ip6, filter->ip.src_cidr6))
         {
             return 0;
         }
 
-        // Destination address.
-        if (filter->ip.dst_ip6[0] != 0 && (ctx->iph6->daddr.in6_u.u6_addr32[0] != filter->ip.dst_ip6[0] || ctx->iph6->daddr.in6_u.u6_addr32[1] != filter->ip.dst_ip6[1] || ctx->iph6->daddr.in6_u.u6_addr32[2] != filter->ip.dst_ip6[2] || ctx->iph6->daddr.in6_u.u6_addr32[3] != filter->ip.dst_ip6[3]))
+        // Destination address (dst_cidr6 0 or 128 = exact match, 1-127 = prefix match).
+        if (is_ip6_set(filter->ip.dst_ip6) && !is_ip6_in_range(ctx->iph6->daddr.in6_u.u6_addr32, filter->ip.dst_ip6, filter->ip.dst_cidr6))
         {
             return 0;
         }
@@ -294,6 +300,15 @@ static __always_inline long process_rule(u32 idx, void* data)
         {
             return 0;
         }
+    }
+
+    // Per-filter counters (every filter, logged or not).
+    filter_stats_t *fstats = bpf_map_lookup_elem(&map_filter_stats, &idx);
+
+    if (fstats)
+    {
+        fstats->packets++;
+        fstats->bytes += ctx->pkt_len;
     }
 
 #ifdef ENABLE_FILTER_LOGGING

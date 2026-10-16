@@ -21,6 +21,40 @@
 int cont = 1;
 int doing_stats = 0;
 
+// BPF maps pinned to XDP_MAP_PIN_DIR when pin_maps is enabled.
+static const char* pinned_maps[] =
+{
+    "map_stats",
+    "map_block",
+    "map_block_perm",
+#ifdef ENABLE_IPV6
+    "map_block6",
+    "map_block6_perm",
+#endif
+
+#ifdef ENABLE_IP_RANGE_DROP
+    "map_range_drop",
+#ifdef ENABLE_IPV6
+    "map_range_drop6",
+#endif
+#endif
+
+#ifdef ENABLE_ALLOWLIST
+    "map_allow",
+#ifdef ENABLE_IPV6
+    "map_allow6",
+#endif
+#endif
+
+#ifdef ENABLE_FILTERS
+    "map_filters",
+    "map_filter_stats",
+#ifdef ENABLE_FILTER_LOGGING
+    "map_filter_log",
+#endif
+#endif
+};
+
 /**
  * Unpins required BPF maps from file system.
  * 
@@ -32,66 +66,43 @@ static void unpin_needed_maps(config__t* cfg, struct bpf_object* obj, int ignore
 {
     int ret;
 
-    // Unpin stats map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_stats")) != 0)
+    for (size_t i = 0; i < sizeof(pinned_maps) / sizeof(pinned_maps[0]); i++)
     {
-        if (!ignore_errors)
-        {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_stats' from file system (%d).", ret);
-        }
-    }
+        const char* name = pinned_maps[i];
 
-    // Unpin block map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_block")) != 0)
-    {
-        if (!ignore_errors)
+        if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, name)) != 0)
         {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_block' from file system (%d).", ret);
+            if (!ignore_errors)
+            {
+                log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map '%s' from file system (%d).", name, ret);
+            }
         }
     }
-#ifdef ENABLE_IPV6
-    // Unpin block (IPv6) map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_block6")) != 0)
-    {
-        if (!ignore_errors)
-        {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_block6' from file system (%d).", ret);
-        }
-    }
-#endif
+}
 
-#ifdef ENABLE_IP_RANGE_DROP
-    // Unpin IPv4 range drop map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_range_drop")) != 0)
-    {
-        if (!ignore_errors)
-        {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_range_drop' from file system (%d).", ret);
-        }
-    }
-#endif
+/**
+ * Pins required BPF maps to the file system.
+ * 
+ * @param cfg A pointer to the config structure.
+ * @param obj A pointer to the BPF object.
+ */
+static void pin_needed_maps(config__t* cfg, struct bpf_object* obj)
+{
+    int ret;
 
-#ifdef ENABLE_FILTERS
-    // Unpin filters map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_filters")) != 0)
+    for (size_t i = 0; i < sizeof(pinned_maps) / sizeof(pinned_maps[0]); i++)
     {
-        if (!ignore_errors)
-        {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_filters' from file system (%d).", ret);
-        }
-    }
+        const char* name = pinned_maps[i];
 
-#ifdef ENABLE_FILTER_LOGGING
-    // Unpin filters log map.
-    if ((ret = unpin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_filter_log")) != 0)
-    {
-        if (!ignore_errors)
+        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, name)) != 0)
         {
-            log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin BPF map 'map_filter_log' from file system (%d).", ret);
+            log_msg(cfg, 1, 0, "[WARNING] Failed to pin '%s' to file system (%d)...", name, ret);
+        }
+        else
+        {
+            log_msg(cfg, 3, 0, "BPF map '%s' pinned to '%s/%s'.", name, XDP_MAP_PIN_DIR, name);
         }
     }
-#endif
-#endif
 }
 
 int main(int argc, char *argv[])
@@ -107,6 +118,7 @@ int main(int argc, char *argv[])
     cli.no_stats = -1;
     cli.stats_per_second = -1;
     cli.stdout_update_time = -1;
+    cli.filter_log_consume = -1;
 
     parse_cli(&cli, argc, argv);
 
@@ -131,6 +143,7 @@ int main(int argc, char *argv[])
     cfg_overrides.no_stats = cli.no_stats;
     cfg_overrides.stats_per_second = cli.stats_per_second;
     cfg_overrides.stdout_update_time = cli.stdout_update_time;
+    cfg_overrides.filter_log_consume = cli.filter_log_consume;
 
     // Load config.
     if ((ret = load_cfg(&cfg, cli.cfg_file, 1, &cfg_overrides)) != 0)
@@ -287,6 +300,11 @@ int main(int argc, char *argv[])
     {
         log_msg(&cfg, 1, 0, "[WARNING] Failed to find 'map_filter_log' BPF map. Filter logging will be disabled...");
     }
+    else if (!cfg.filter_log_consume)
+    {
+        // A ring buffer has a single consumer; leave map_filter_log to another process.
+        log_msg(&cfg, 2, 0, "Not consuming 'map_filter_log' (filter_log_consume is disabled)...");
+    }
     else
     {
         log_msg(&cfg, 3, 0, "map_filter_log FD => %d.", map_filter_log);
@@ -307,6 +325,49 @@ int main(int argc, char *argv[])
     {
         log_msg(&cfg, 3, 0, "map_range_drop FD => %d.", map_range_drop);
     }
+
+    int map_range_drop6 = -1;
+
+#ifdef ENABLE_IPV6
+    map_range_drop6 = get_map_fd(prog, "map_range_drop6");
+
+    if (map_range_drop6 < 0)
+    {
+        log_msg(&cfg, 1, 0, "[WARNING] Failed to find 'map_range_drop6' BPF map. IPv6 range drops will be disabled...");
+    }
+    else
+    {
+        log_msg(&cfg, 3, 0, "map_range_drop6 FD => %d.", map_range_drop6);
+    }
+#endif
+#endif
+
+#ifdef ENABLE_ALLOWLIST
+    int map_allow = get_map_fd(prog, "map_allow");
+
+    if (map_allow < 0)
+    {
+        log_msg(&cfg, 1, 0, "[WARNING] Failed to find 'map_allow' BPF map. The IPv4 allowlist will be disabled...");
+    }
+    else
+    {
+        log_msg(&cfg, 3, 0, "map_allow FD => %d.", map_allow);
+    }
+
+    int map_allow6 = -1;
+
+#ifdef ENABLE_IPV6
+    map_allow6 = get_map_fd(prog, "map_allow6");
+
+    if (map_allow6 < 0)
+    {
+        log_msg(&cfg, 1, 0, "[WARNING] Failed to find 'map_allow6' BPF map. The IPv6 allowlist will be disabled...");
+    }
+    else
+    {
+        log_msg(&cfg, 3, 0, "map_allow6 FD => %d.", map_allow6);
+    }
+#endif
 #endif
 
     log_msg(&cfg, 3, 0, "map_stats FD => %d.", map_stats);
@@ -322,71 +383,7 @@ int main(int argc, char *argv[])
         // So it's best to attempt to unpin the maps before pinning while ignoring errors.
         unpin_needed_maps(&cfg, obj, 1);
 
-        // Pin the stats map.
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_stats")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_stats' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_stats' pinned to '%s/map_stats'.", XDP_MAP_PIN_DIR);
-        }
-
-        // Pin the block maps.
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_block")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_block' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_block' pinned to '%s/map_block'.", XDP_MAP_PIN_DIR);
-        }
-#ifdef ENABLE_IPV6
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_block6")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_block6' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_block6' pinned to '%s/map_block6'.", XDP_MAP_PIN_DIR);
-        }
-#endif
-
-#ifdef ENABLE_IP_RANGE_DROP
-        // Pin the IPv4 range drop map.
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_range_drop")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_range_drop' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_range_drop' pinned to '%s/map_range_drop'.", XDP_MAP_PIN_DIR);
-        }
-#endif
-
-#ifdef ENABLE_FILTERS
-        // Pin the filters map.
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_filters")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_filters' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_filters' pinned to '%s/map_filters'.", XDP_MAP_PIN_DIR);
-        }
-
-#ifdef ENABLE_FILTER_LOGGING
-        // Pin the filters log map.
-        if ((ret = pin_bpf_map(obj, XDP_MAP_PIN_DIR, "map_filter_log")) != 0)
-        {
-            log_msg(&cfg, 1, 0, "[WARNING] Failed to pin 'map_filter_log' to file system (%d)...", ret);
-        }
-        else
-        {
-            log_msg(&cfg, 3, 0, "BPF map 'map_filter_log' pinned to '%s/map_filter_log'.", XDP_MAP_PIN_DIR);
-        }
-#endif
-#endif
+        pin_needed_maps(&cfg, obj);
     }
 
 #ifdef ENABLE_FILTERS
@@ -397,12 +394,22 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef ENABLE_IP_RANGE_DROP
-    if (map_range_drop > -1)
+    if (map_range_drop > -1 || map_range_drop6 > -1)
     {
         log_msg(&cfg, 2, 0, "Updating IP drop ranges...");
 
-        // Update IP range drops.
-        update_range_drops(map_range_drop, &cfg);
+        // Update IP range drops (IPv4 and IPv6).
+        update_range_drops(map_range_drop, map_range_drop6, &cfg);
+    }
+#endif
+
+#ifdef ENABLE_ALLOWLIST
+    if (map_allow > -1 || map_allow6 > -1)
+    {
+        log_msg(&cfg, 2, 0, "Updating IP allow ranges...");
+
+        // Update allowlist (IPv4 and IPv6).
+        update_allow_ranges(map_allow, map_allow6, &cfg);
     }
 #endif
 

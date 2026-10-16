@@ -70,11 +70,11 @@ int main(int argc, char *argv[])
         printf("OPTIONS:\n");
         printf("  -c, --cfg         The path to the config file (default /etc/xdpfw/xdpfw.conf).\n");
         printf("  -s, --save        Saves the new config to file system.\n");
-        printf("  -m, --mode        The mode to use (0 = filters, 1 = IPv4 range drop, 2 = IP block map).\n");
+        printf("  -m, --mode        The mode to use (0 = filters, 1 = IP range drop, 2 = IP block map, 3 = IP allowlist).\n");
         printf("  -i, --idx         The filters index to update when using filters mode (0) (index starts from 1; retrieve index using xdpfw -l).\n");
-        printf("  -d, --ip          The IP range or single IP to add (for modes 1 and 2).\n");
-        printf("  -v, --v6          If set, parses IP address as IPv6 when adding to block map (for mode 2).\n");
-        printf("  -e, --expires     How long to block the IP for in seconds (for mode 2).\n\n");
+        printf("  -d, --ip          The IP range or single IP to add (for modes 1, 2 and 3). IPv6 ranges (containing ':') go to the IPv6 maps.\n");
+        printf("  -v, --v6          If set, parses IP address as IPv6 (for modes 1, 2 and 3; implied when the address contains ':').\n");
+        printf("  -e, --expires     How long to block the IP for in seconds (for mode 2). 0 or unset = permanent (map_block_perm/map_block6_perm).\n\n");
 
         printf("Filter Mode Options:\n");
         printf("  --enabled         Enables or disables the dynamic filter.\n");
@@ -84,8 +84,8 @@ int main(int argc, char *argv[])
 
         printf("  --sip             The source IPv4 address (with CIDR support).\n");
         printf("  --dip             The destination IPv4 address (with CIDR support).\n");
-        printf("  --sip6            The source IPv6 address.\n");
-        printf("  --dip6            The destination IPv6 address.\n");
+        printf("  --sip6            The source IPv6 address (with prefix length support, e.g. 2001:db8::/32).\n");
+        printf("  --dip6            The destination IPv6 address (with prefix length support).\n");
         printf("  --min-ttl         The minimum IP TTL to match.\n");
         printf("  --max-ttl         The maximum IP TTL to match.\n");
         printf("  --min-len         The minimum packet length to match.\n");
@@ -366,10 +366,10 @@ int main(int argc, char *argv[])
 
         update_filters(map_filters, &cfg);
     }
-    // Handle IPv4 range drop mode.
+    // Handle IP range drop mode (IPv4 or IPv6).
     else if (cli.mode == 1)
     {
-        printf("Using IPv4 range drop mode (1)...\n");
+        printf("Using IP range drop mode (1)...\n");
 
         // Make sure IP range is specified.
         if (!cli.ip)
@@ -379,27 +379,59 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        // Get range map.
-        int map_range_drop = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_range_drop");
-
-        if (map_range_drop < 0)
+        if (cli.v6 || is_ip6_str(cli.ip))
         {
-            fprintf(stderr, "Failed to retrieve 'map_range_drop' BPF map FD.\n");
+            int map_range_drop6 = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_range_drop6");
 
-            return EXIT_FAILURE;
+            if (map_range_drop6 < 0)
+            {
+                fprintf(stderr, "Failed to retrieve 'map_range_drop6' BPF map FD.\n");
+
+                return EXIT_FAILURE;
+            }
+
+            printf("Using 'map_range_drop6' FD => %d.\n", map_range_drop6);
+
+            ip6_range_t range = parse_ip6_range(cli.ip);
+
+            if (!range.success)
+            {
+                fprintf(stderr, "Failed to parse IPv6 range '%s'.\n", cli.ip);
+
+                return EXIT_FAILURE;
+            }
+
+            if ((ret = add_range_drop6(map_range_drop6, range.ip, range.cidr)) != 0)
+            {
+                fprintf(stderr, "Error adding range to BPF map (%d).\n", ret);
+
+                return EXIT_FAILURE;
+            }
         }
-
-        printf("Using 'map_range_drop' FD => %d.\n", map_range_drop);
-
-        // Parse IP range.
-        ip_range_t range = parse_ip_range(cli.ip);
-
-        // Attempt to add range.
-        if ((ret = add_range_drop(map_range_drop, range.ip, range.cidr)) != 0)
+        else
         {
-            fprintf(stderr, "Error adding range to BPF map (%d).\n", ret);
+            // Get range map.
+            int map_range_drop = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_range_drop");
 
-            return EXIT_FAILURE;
+            if (map_range_drop < 0)
+            {
+                fprintf(stderr, "Failed to retrieve 'map_range_drop' BPF map FD.\n");
+
+                return EXIT_FAILURE;
+            }
+
+            printf("Using 'map_range_drop' FD => %d.\n", map_range_drop);
+
+            // Parse IP range.
+            ip_range_t range = parse_ip_range(cli.ip);
+
+            // Attempt to add range.
+            if ((ret = add_range_drop(map_range_drop, range.ip, range.cidr)) != 0)
+            {
+                fprintf(stderr, "Error adding range to BPF map (%d).\n", ret);
+
+                return EXIT_FAILURE;
+            }
         }
 
         printf("Added IP range '%s' to IP range drop map...\n", cli.ip);
@@ -419,6 +451,86 @@ int main(int argc, char *argv[])
             cfg.drop_ranges[idx] = strdup(cli.ip);
         }
     }
+    // Handle IP allowlist mode (IPv4 or IPv6).
+    else if (cli.mode == 3)
+    {
+        printf("Using IP allowlist mode (3)...\n");
+
+        if (!cli.ip)
+        {
+            fprintf(stderr, "No IP address or range specified. Please set an IP range using -d, --ip arguments.\n");
+
+            return EXIT_FAILURE;
+        }
+
+        if (cli.v6 || is_ip6_str(cli.ip))
+        {
+            int map_allow6 = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_allow6");
+
+            if (map_allow6 < 0)
+            {
+                fprintf(stderr, "Failed to retrieve 'map_allow6' BPF map FD (is ENABLE_ALLOWLIST defined?).\n");
+
+                return EXIT_FAILURE;
+            }
+
+            printf("Using 'map_allow6' FD => %d.\n", map_allow6);
+
+            ip6_range_t range = parse_ip6_range(cli.ip);
+
+            if (!range.success)
+            {
+                fprintf(stderr, "Failed to parse IPv6 range '%s'.\n", cli.ip);
+
+                return EXIT_FAILURE;
+            }
+
+            if ((ret = add_allow6(map_allow6, range.ip, range.cidr)) != 0)
+            {
+                fprintf(stderr, "Error adding range to BPF map (%d).\n", ret);
+
+                return EXIT_FAILURE;
+            }
+        }
+        else
+        {
+            int map_allow = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_allow");
+
+            if (map_allow < 0)
+            {
+                fprintf(stderr, "Failed to retrieve 'map_allow' BPF map FD (is ENABLE_ALLOWLIST defined?).\n");
+
+                return EXIT_FAILURE;
+            }
+
+            printf("Using 'map_allow' FD => %d.\n", map_allow);
+
+            ip_range_t range = parse_ip_range(cli.ip);
+
+            if ((ret = add_allow(map_allow, range.ip, range.cidr)) != 0)
+            {
+                fprintf(stderr, "Error adding range to BPF map (%d).\n", ret);
+
+                return EXIT_FAILURE;
+            }
+        }
+
+        printf("Added IP range '%s' to the allowlist...\n", cli.ip);
+
+        if (cli.save)
+        {
+            int idx = get_next_ip_allow_range_idx(&cfg);
+
+            if (idx < 0)
+            {
+                fprintf(stderr, "No available IP allow range indexes. Perhaps the maximum allow ranges has been exceeded?\n");
+
+                return EXIT_FAILURE;
+            }
+
+            cfg.allow_ranges[idx] = strdup(cli.ip);
+        }
+    }
     // Handle block map mode.
     else
     {
@@ -426,32 +538,57 @@ int main(int argc, char *argv[])
 
         if (!cli.ip)
         {
-            fprintf(stderr, "No source IP address specified. Please set an IP using -s, --ip arguments.\n");
+            fprintf(stderr, "No source IP address specified. Please set an IP using -d, --ip arguments.\n");
 
             return EXIT_FAILURE;
         }
 
+        // Expiry is CLOCK_MONOTONIC nanoseconds (what bpf_ktime_get_ns() returns). 0 = permanent.
         u64 expires_rel = 0;
 
         if (cli.expires > 0)
         {
-            expires_rel = get_boot_nano_time() + ((u64)cli.expires * 1e9);
+            expires_rel = get_boot_nano_time() + ((u64)cli.expires * 1000000000ULL);
         }
 
-        int map_block = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_block");
-        int map_block6 = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_block6");
+        int v6 = cli.v6 || is_ip6_str(cli.ip);
 
-        if (cli.v6)
+        // Permanent blocks go to the non-LRU maps so they are never evicted; temporary blocks go to the LRU maps.
+        const char* map_name = v6 ? "map_block6" : "map_block";
+        const char* map_name_perm = v6 ? "map_block6_perm" : "map_block_perm";
+
+        int map = -1;
+
+        if (expires_rel == 0)
         {
-            if (map_block6 < 0)
+            map = get_map_fd_pin(XDP_MAP_PIN_DIR, map_name_perm);
+
+            if (map < 0)
             {
-                fprintf(stderr, "Failed to find the 'map_block6' BPF map.\n");
-
-                return EXIT_FAILURE;
+                fprintf(stderr, "[WARNING] Failed to find the '%s' BPF map; using '%s' for the permanent block.\n", map_name_perm, map_name);
             }
+            else
+            {
+                map_name = map_name_perm;
+            }
+        }
 
-            printf("Using 'map_block6' FD => %d.\n", map_block6);
+        if (map < 0)
+        {
+            map = get_map_fd_pin(XDP_MAP_PIN_DIR, map_name);
+        }
 
+        if (map < 0)
+        {
+            fprintf(stderr, "Failed to find the '%s' BPF map.\n", map_name);
+
+            return EXIT_FAILURE;
+        }
+
+        printf("Using '%s' FD => %d.\n", map_name, map);
+
+        if (v6)
+        {
             struct in6_addr addr;
 
             if ((ret = inet_pton(AF_INET6, cli.ip, &addr)) != 1)
@@ -461,14 +598,10 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
-            u128 ip = 0;
+            // The key is the raw address bytes (network order), as the XDP program builds it.
+            u128 ip = ip6_to_block_key(&addr);
 
-            for (int i = 0; i < 16; i++)
-            {
-                ip = (ip << 8) | addr.s6_addr[i];
-            }
-
-            if ((ret = add_block6(map_block6, ip, expires_rel)) != 0)
+            if ((ret = add_block6(map, ip, expires_rel)) != 0)
             {
                 fprintf(stderr, "Failed to add IP '%s' to BPF map (%d).\n", cli.ip, ret);
 
@@ -477,15 +610,6 @@ int main(int argc, char *argv[])
         }
         else
         {
-            if (map_block < 0)
-            {
-                fprintf(stderr, "Failed to find the 'map_block' BPF map.\n");
-
-                return EXIT_FAILURE;
-            }
-
-            printf("Using 'map_block' FD => %d.\n", map_block);
-
             struct in_addr addr;
 
             if ((ret = inet_pton(AF_INET, cli.ip, &addr)) != 1)
@@ -495,21 +619,21 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
-            if ((ret = add_block(map_block, addr.s_addr, expires_rel)) != 0)
+            if ((ret = add_block(map, addr.s_addr, expires_rel)) != 0)
             {
                 fprintf(stderr, "Failed to add IP '%s' too BPF map (%d).\n", cli.ip, ret);
 
                 return EXIT_FAILURE;
             }
+        }
 
-            if (cli.expires > 0)
-            {
-                printf("Added '%s' to block map for %lld seconds...\n", cli.ip, cli.expires);
-            }
-            else
-            {
-                printf("Added '%s' to block map indefinitely...\n", cli.ip);
-            }
+        if (cli.expires > 0)
+        {
+            printf("Added '%s' to block map for %lld seconds...\n", cli.ip, cli.expires);
+        }
+        else
+        {
+            printf("Added '%s' to block map indefinitely...\n", cli.ip);
         }
     }
 

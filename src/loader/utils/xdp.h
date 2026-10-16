@@ -23,6 +23,7 @@ void delete_filters(int map_filters);
 
 int update_filter(int map_filters, filter_rule_cfg_t* filter, int idx);
 void update_filters(int map_filters, config__t *cfg);
+filter_rule_cfg_t* get_filter_by_slot(config__t* cfg, int slot);
 
 int pin_bpf_map(struct bpf_object* obj, const char* pin_dir, const char* map_name);
 int unpin_bpf_map(struct bpf_object* obj, const char* pin_dir, const char* map_name);
@@ -36,4 +37,15 @@ int add_block6(int map_block6, u128 ip, u64 expires);
 
 int delete_range_drop(int map_range_drop, u32 net, u8 cidr);
 int add_range_drop(int map_range_drop, u32 net, u8 cidr);
-void update_range_drops(int map_range_drop, config__t* cfg);
+void update_range_drops(int map_range_drop, int map_range_drop6, config__t* cfg);
+
+int delete_range_drop6(int map_range_drop6, const u32* net, u8 cidr);
+int add_range_drop6(int map_range_drop6, const u32* net, u8 cidr);
+
+int delete_allow(int map_allow, u32 net, u8 cidr);
+int add_allow(int map_allow, u32 net, u8 cidr);
+int delete_allow6(int map_allow6, const u32* net, u8 cidr);
+int add_allow6(int map_allow6, const u32* net, u8 cidr);
+void update_allow_ranges(int map_allow, int map_allow6, config__t* cfg);
+
+u128 ip6_to_block_key(const struct in6_addr* addr);
