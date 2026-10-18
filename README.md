@@ -50,6 +50,14 @@ All features can be enabled or disabled through the build-time configuration ([`
 * **Pinned BPF maps** allow external programs to interact with firewall rules.
 * CLI utilities (`xdpfw-add`, `xdpfw-del`) enable **dynamic rule** management without restarting the firewall.
 * Supports integration with **user-space security systems** for enhanced protection.
+* With `pin_maps` on, the loaded XDP program is pinned too, at `/sys/fs/bpf/xdpfw/xdp_prog`, so another process can read its run-time statistics (`run_time_ns`, `run_cnt`) with only `CAP_BPF`. It is removed on exit like the maps.
+
+### Atomic Rule Swaps, Shadow Rules & Sanity Checks
+* `map_filters` holds **two buffers** of `MAX_FILTERS` slots (slot `i` of buffer `b` is key `b * MAX_FILTERS + i`). The program reads `map_filter_active` once per packet and evaluates only that buffer, so a writer fills the inactive buffer, flips `map_filter_active` with one write, then clears the old buffer: a packet sees the whole old rule set or the whole new one. The loader, `xdpfw-add` and `xdpfw-del` all write this way.
+* A filter with `shadow` set only counts its matches (`shadow_packets`/`shadow_bytes` in `map_filter_stats`) and evaluation continues as if it had not matched. Rate limit state is per source/flow, so it is updated the same way as for an enforced filter.
+* Per-filter counters are indexed by the filter's `stats_idx` (not its slot), so a writer can keep them with a filter that moves.
+* `ENABLE_SANITY` adds built-in checks, each with a mode (off, shadow, enforce) in `map_sanity` and counters in `map_sanity_stats`: martian sources, land (source is one of the addresses in `map_local_addr`/`map_local_addr6`), TCP NULL/SYN+FIN/Xmas (flags masked with `0x3F`), TCP data offset below 5, port 0, and a stateless port gate (`map_port_gate`: TCP SYN without ACK and UDP to ports not in a bitmap, DHCP client port 68 excepted; an empty gate is off). They run after the allowlist and the block/range maps. Every check is off until a writer (e.g. the harana homeserver) sets its mode; the loader does not.
+* `make test` (as root) loads the program and checks its verdicts with `BPF_PROG_TEST_RUN`.
 
 ## 🛠️ Building & Installing
 Before building, ensure the following packages are installed. These packages can be installed with `apt` on Debian-based systems (e.g. Ubuntu, etc.), but there should be similar names in other package managers.
@@ -179,6 +187,7 @@ Here are more details on the layout of the runtime configuration.
 | ---- | ---- | ------- | ----------- |
 | enabled | bool | `true` | Whether the rule is enabled or not. Disabled rules are still written to `map_filters` (with `enabled` cleared) and skipped by the XDP program, so they keep their slot. |
 | log | bool | `false` | Whether to log packets that are matched. |
+| shadow | bool | `false` | Count matches only (`map_filter_stats` `shadow_packets`/`shadow_bytes`) and go on to the next rule; the action, block time and logging are not applied. |
 | action | int | `1` | The value of `0` drops or blocks the packet while `1` allows/passes the packet through. |
 | block_time | int | `1` | The amount of seconds to block the source IP for if matched. |
 | ip_pps | int64 | `NULL` | Matches if this threshold of packets per second is exceeded for a source IP. |
@@ -239,7 +248,7 @@ You may additionally specified UDP header options for a filter rule which start 
 * When a filter rule's setting is set, but doesn't match the packet, the program moves onto the next filter rule. Therefore, all of the filter rule's settings that are set must match the packet in order to perform the action specified. Think of it as something like `if src_ip == "10.50.0.3" and udp_dport == 27015: action`. 
 * As of right now, you can specify up to **1000 total** dynamic filter rules. You may increase this limit by raising the `MAX_FILTERS` constant in the `src/common/config.h` [file](https://github.com/gamemann/XDP-Firewall/blob/master/src/common/config.h#L5) and then recompile the firewall.
 * IPv6 prefix lengths are stored in `filter_t`'s `ip.src_cidr6`/`ip.dst_cidr6`. `0` and `128` both mean an exact match (so filters written by programs that don't know these fields keep matching exactly); `1` to `127` match the prefix.
-* Every filter has packet and byte counters in the `map_filter_stats` BPF map (indexed by the same slot as `map_filters`), whether or not the filter logs.
+* Every filter has packet and byte counters in the `map_filter_stats` BPF map (indexed by the filter's `stats_idx`; the loader uses the slot), whether or not the filter logs.
 * At this time, each port value supports a single port range per filter rule. This is because adding support for multiple ports/port ranges would require an additional `for` loop which would make the BPF program larger and result in slower performance, etc.
 
 ### Runtime Example

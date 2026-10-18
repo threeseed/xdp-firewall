@@ -14,6 +14,7 @@
 #include <xdp/utils/rule.h>
 #include <xdp/utils/stats.h>
 #include <xdp/utils/helpers.h>
+#include <xdp/utils/sanity.h>
 
 #include <xdp/utils/maps.h>
 
@@ -175,7 +176,21 @@ int xdp_prog_main(struct xdp_md *ctx)
 #endif
 #endif
 
-#ifdef ENABLE_FILTERS
+#ifdef ENABLE_SANITY
+    // Built-in sanity checks, after the allowlist (an allowlisted source skips them) and the block/range maps (cheaper, and they need no parsing).
+    // A check in shadow mode only counts in map_sanity_stats; one in enforce mode drops.
+    u32 sanity_key = 0;
+    sanity_cfg_t* sanity = bpf_map_lookup_elem(&map_sanity, &sanity_key);
+
+    if (sanity_check_l3(sanity, iph, iph6, pkt_bytes))
+    {
+        inc_pkt_stats(stats, STATS_TYPE_DROPPED, pkt_bytes);
+
+        return XDP_DROP;
+    }
+#endif
+
+#if defined(ENABLE_FILTERS) || defined(ENABLE_SANITY)
     // Retrieve total packet length.
     u16 pkt_len = data_end - data;
 
@@ -319,6 +334,18 @@ int xdp_prog_main(struct xdp_md *ctx)
     }
 #endif
 
+#endif
+
+#ifdef ENABLE_SANITY
+    // Layer-4 sanity checks and the port gate, before the rate limit maps are updated so a flood they drop does not churn them.
+    if (sanity_check_l4(sanity, tcph, udph, pkt_bytes))
+    {
+        inc_pkt_stats(stats, STATS_TYPE_DROPPED, pkt_bytes);
+
+        return XDP_DROP;
+    }
+#endif
+
 #ifdef ENABLE_FILTERS
     // Update client stats (PPS/BPS).
     u64 ip_pps = 0;
@@ -351,10 +378,15 @@ int xdp_prog_main(struct xdp_md *ctx)
     }
 #endif
 #endif
-#endif
 
     // Create rule context.
     rule_ctx_t rule = {0};
+
+    // Evaluate the buffer map_filter_active names, read once so the packet sees one whole rule set.
+    u32 active_key = 0;
+    u32* active = bpf_map_lookup_elem(&map_filter_active, &active_key);
+
+    rule.base = (active && (*active & 1)) ? MAX_FILTERS : 0;
     rule.flow_pps = flow_pps;
     rule.flow_bps = flow_bps;
     rule.ip_pps = ip_pps;

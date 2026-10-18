@@ -18,11 +18,11 @@ struct bpf_object* get_bpf_obj(struct xdp_program* prog);
 
 int attach_xdp(struct xdp_program *prog, char** mode, int ifidx, int detach, int force_skb, int force_offload);
 
-int delete_filter(int map_filters, u32 idx);
+int delete_filter(int map_filters, u32 key);
 void delete_filters(int map_filters);
 
-int update_filter(int map_filters, filter_rule_cfg_t* filter, int idx);
-void update_filters(int map_filters, config__t *cfg);
+int update_filter(int map_filters, filter_rule_cfg_t* filter, u32 key, u32 stats_idx);
+void update_filters(int map_filters, int map_filter_active, config__t *cfg);
 filter_rule_cfg_t* get_filter_by_slot(config__t* cfg, int slot);
 
 int pin_bpf_map(struct bpf_object* obj, const char* pin_dir, const char* map_name);

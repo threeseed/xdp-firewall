@@ -138,19 +138,32 @@ struct
 #endif
 #endif
 
+// Two buffers of MAX_FILTERS filters (see FILTER_BUFFERS): slot i of buffer b is key b * MAX_FILTERS + i.
+// Only the buffer map_filter_active names is evaluated; within it, slots are walked from 0 up to the first one whose set bit is clear.
+// A plain (shared) array: the filters are the same on every CPU, and one write per slot is all an update costs.
 struct 
 {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, MAX_FILTERS);
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, FILTER_BUFFERS * MAX_FILTERS);
     __type(key, u32);
     __type(value, filter_t);
 } map_filters SEC(".maps");
 
-// Per-filter packet/byte counters, indexed by the same slot as map_filters.
+// The active map_filters buffer (0 or 1; only the low bit is read), single entry at key 0.
+// Read once per packet, so flipping it swaps the whole rule set at once.
+struct 
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} map_filter_active SEC(".maps");
+
+// Per-filter packet/byte counters, indexed by filter_t's stats_idx (not by slot), so they follow a filter across slots and buffers.
 struct 
 {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, MAX_FILTERS);
+    __uint(max_entries, MAX_FILTER_STATS);
     __type(key, u32);
     __type(value, filter_stats_t);
 } map_filter_stats SEC(".maps");
@@ -161,5 +174,54 @@ struct
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 16);
 } map_filter_log SEC(".maps");
+#endif
+#endif
+
+#ifdef ENABLE_SANITY
+// Sanity check modes (sanity_cfg_t), single entry at key 0. Zeroed (every check off) until a writer sets it.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, sanity_cfg_t);
+} map_sanity SEC(".maps");
+
+// Per-reason sanity counters, indexed by SANITY_*.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, SANITY_REASONS);
+    __type(key, u32);
+    __type(value, sanity_stats_t);
+} map_sanity_stats SEC(".maps");
+
+// The stateless port gate: the TCP (PORT_GATE_TCP) and UDP (PORT_GATE_UDP) destination ports to let through.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, u32);
+    __type(value, port_gate_t);
+} map_port_gate SEC(".maps");
+
+// The host's own IPv4 addresses (network byte order), for the land check. The value is not read.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_LOCAL_ADDRS);
+    __type(key, u32);
+    __type(value, u8);
+} map_local_addr SEC(".maps");
+
+#ifdef ENABLE_IPV6
+// The host's own IPv6 addresses (the 16 raw address bytes), for the land check. The value is not read.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_LOCAL_ADDRS);
+    __type(key, u128);
+    __type(value, u8);
+} map_local_addr6 SEC(".maps");
 #endif
 #endif

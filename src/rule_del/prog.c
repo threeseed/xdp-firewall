@@ -89,6 +89,9 @@ int main(int argc, char *argv[])
 
         printf("Using 'map_filters' FD => %d...\n", map_filters);
 
+        // Without it (an older XDP program) the filters are rewritten in place.
+        int map_filter_active = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_filter_active");
+
         int idx = -1;
         int cfg_idx = cli.idx - 1;
         int cur_idx = 0;
@@ -132,7 +135,7 @@ int main(int argc, char *argv[])
         // Update filters.
         fprintf(stdout, "Updating filters...\n");
 
-        update_filters(map_filters, &cfg);
+        update_filters(map_filters, map_filter_active, &cfg);
     }
     // Handle IP range drop mode (IPv4 or IPv6).
     else if (cli.mode == 1)

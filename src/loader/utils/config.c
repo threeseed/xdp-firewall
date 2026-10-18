@@ -414,6 +414,14 @@ int parse_cfg(config__t *cfg, const char* data, config_overrides_t* overrides)
                 filter->log = log;
             }
 
+            // Shadow.
+            int shadow;
+
+            if (config_setting_lookup_bool(filter_cfg, "shadow", &shadow) == CONFIG_TRUE)
+            {
+                filter->shadow = shadow;
+            }
+
             // Action (required).
             int action;
 
@@ -932,6 +940,13 @@ int save_cfg(config__t* cfg, const char* file_path)
                     config_setting_set_bool(log, filter->log);
                 }
 
+                // Add shadow setting.
+                if (filter->shadow > 0)
+                {
+                    config_setting_t* shadow = config_setting_add(filter_cfg, "shadow", CONFIG_TYPE_BOOL);
+                    config_setting_set_bool(shadow, filter->shadow);
+                }
+
                 // Add action setting.
                 if (filter->action > -1)
                 {
@@ -1233,6 +1248,7 @@ void set_filter_defaults(filter_rule_cfg_t* filter)
     filter->enabled = 1;
 
     filter->log = 0;
+    filter->shadow = 0;
 
     filter->action = 1;
     filter->block_time = 1;
@@ -1420,7 +1436,8 @@ void print_filter(filter_rule_cfg_t* filter, int idx)
 {
     printf("\tFilter #%d\n", idx);
     printf("\t\tEnabled => %d\n", filter->enabled);
-    printf("\t\tLog => %d\n\n", filter->log);
+    printf("\t\tLog => %d\n", filter->log);
+    printf("\t\tShadow => %d\n\n", filter->shadow);
 
     printf("\t\tAction => %d (0 = Block, 1 = Allow)\n", filter->action);
     printf("\t\tBlock Time => %d\n\n", filter->block_time);

@@ -28,6 +28,22 @@
 // Decrease this value if you receive errors related to the BPF program being too large.
 #define MAX_FILTERS 1000
 
+// map_filters holds two buffers of MAX_FILTERS filters each (slot i of buffer b is key b * MAX_FILTERS + i).
+// The XDP program reads map_filter_active once per packet and evaluates only that buffer, so a writer fills the inactive buffer, flips map_filter_active with one write, then clears the old buffer.
+// A packet therefore sees either the whole old rule set or the whole new one.
+#define FILTER_BUFFERS 2
+
+// Entries in map_filter_stats (a filter's stats_idx must be below this).
+// Twice MAX_FILTERS, so a writer replacing every filter can give each new filter counters no live filter uses.
+#define MAX_FILTER_STATS (FILTER_BUFFERS * MAX_FILTERS)
+
+// Enables the built-in L3/L4 sanity checks and the stateless port gate (map_sanity, map_sanity_stats, map_port_gate, map_local_addr, map_local_addr6).
+// Every check is off until its mode is set in map_sanity, so enabling this changes nothing by itself.
+#define ENABLE_SANITY
+
+// Maximum entries in each local address map (map_local_addr, map_local_addr6) the land check reads.
+#define MAX_LOCAL_ADDRS 256
+
 // Feel free to comment this out if you don't want the `blocked` entry on the stats map to be incremented every single time a packet is dropped from the source IP being on the blocked map.
 // Commenting this line out should increase performance when blocking malicious traffic.
 #define DO_STATS_ON_BLOCK_MAP
