@@ -175,6 +175,17 @@ rule_del_utils: rule_del_utils_cli
 rule_del_utils_cli:
 	$(CC) $(INCS) $(FLAGS) -c -o $(BUILD_RULE_DEL_DIR)/$(RULE_DEL_UTILS_cli_OBJ) $(RULE_DEL_UTILS_DIR)/$(RULE_DEL_UTILS_cli_SRC)
 
+# Verdict tests (BPF_PROG_TEST_RUN, needs root): the XDP program built with the defines deployments that manage the maps from another process use, and a harness that loads it.
+TEST_DIR = $(SRC_DIR)/test
+BUILD_TEST_DIR = $(BUILD_DIR)/test
+TEST_DEFINES = -DENABLE_ALLOWLIST -DENABLE_IP_RANGE_DROP -DENABLE_RL_IP
+
+test:
+	mkdir -p $(BUILD_TEST_DIR)
+	$(CC) $(INCS) $(FLAGS) $(TEST_DEFINES) -target bpf -c -o $(BUILD_TEST_DIR)/$(XDP_OBJ) $(XDP_DIR)/$(XDP_SRC)
+	$(CC) $(INCS) $(FLAGS) $(TEST_DEFINES) -o $(BUILD_TEST_DIR)/xdpfw-test $(LIBBPF_OBJS) $(TEST_DIR)/prog.c -lelf -lz
+	$(BUILD_TEST_DIR)/xdpfw-test $(BUILD_TEST_DIR)/$(XDP_OBJ)
+
 # LibXDP chain. We need to install objects here since our program relies on installed object files and such.
 libxdp:
 	$(MAKE) -C $(XDP_TOOLS_DIR) libxdp
@@ -207,5 +218,5 @@ clean:
 	find $(BUILD_RULE_ADD_DIR) -type f ! -name ".*" -exec rm -f {} +
 	find $(BUILD_RULE_DEL_DIR) -type f ! -name ".*" -exec rm -f {} +
 
-.PHONY: all libxdp
+.PHONY: all libxdp test
 .DEFAULT: all

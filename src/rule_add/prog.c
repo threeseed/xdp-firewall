@@ -160,6 +160,9 @@ int main(int argc, char *argv[])
 
         printf("Using 'map_filters' FD => %d...\n", map_filters);
 
+        // Without it (an older XDP program) the filters are rewritten in place.
+        int map_filter_active = get_map_fd_pin(XDP_MAP_PIN_DIR, "map_filter_active");
+
         // Create new base filter and set its defaults.
         filter_rule_cfg_t new_filter = {0};
         set_filter_defaults(&new_filter);
@@ -364,7 +367,7 @@ int main(int argc, char *argv[])
         // Update filters.
         fprintf(stdout, "Updating filters (index %d)...\n", idx);
 
-        update_filters(map_filters, &cfg);
+        update_filters(map_filters, map_filter_active, &cfg);
     }
     // Handle IP range drop mode (IPv4 or IPv6).
     else if (cli.mode == 1)

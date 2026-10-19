@@ -15,6 +15,9 @@
 
 struct rule_ctx
 {
+    // The first map_filters key of the active buffer (0 or MAX_FILTERS), read once per packet from map_filter_active.
+    u32 base;
+
     int matched;
     int action;
     u64 block_time;

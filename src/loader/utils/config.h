@@ -69,6 +69,9 @@ struct filter_rule_cfg
     int log;
     int enabled;
 
+    // Shadow filter: matches are counted but nothing is done (see filter_t).
+    int shadow;
+
     int action;
     int block_time;
 

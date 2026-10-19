@@ -197,22 +197,21 @@ int attach_xdp(struct xdp_program *prog, char** mode, int ifidx, int detach, int
  * Deletes a filter.
  * 
  * @param map_filters The filters BPF map FD.
- * @param idx The filter index to delete.
+ * @param key The map_filters key to clear (buffer * MAX_FILTERS + slot).
  * 
  * @return 0 on success or the error value of bpf_map_update_elem().
  */
-int delete_filter(int map_filters, u32 idx)
+int delete_filter(int map_filters, u32 key)
 {
     // map_filters is an array map, whose elements cannot be deleted (bpf_map_delete_elem() returns -EINVAL).
     // Clear the slot instead; the XDP program stops at the first slot that is not set.
-    filter_t filter_cpus[MAX_CPUS];
-    memset(filter_cpus, 0, sizeof(filter_cpus));
+    filter_t filter = {0};
 
-    return bpf_map_update_elem(map_filters, &idx, &filter_cpus, BPF_ANY);
+    return bpf_map_update_elem(map_filters, &key, &filter, BPF_ANY);
 }
 
 /**
- * Deletes all filters.
+ * Deletes all filters (both buffers).
  * 
  * @param map_filters The filters BPF map FD.
  * 
@@ -220,7 +219,7 @@ int delete_filter(int map_filters, u32 idx)
  */
 void delete_filters(int map_filters)
 {
-    for (int i = 0; i < MAX_FILTERS; i++)
+    for (u32 i = 0; i < FILTER_BUFFERS * MAX_FILTERS; i++)
     {
         delete_filter(map_filters, i);
     }
@@ -231,18 +230,23 @@ void delete_filters(int map_filters)
  * 
  * @param map_filters The filters BPF map FD.
  * @param filter_cfg A pointer to the filter config rule.
- * @param idx The filter index to insert or update.
+ * @param key The map_filters key to write (buffer * MAX_FILTERS + slot).
+ * @param stats_idx The map_filter_stats index the filter counts into.
  * 
  * @return 0 on success or error value of bpf_map_update_elem().
  */
-int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
+int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, u32 key, u32 stats_idx)
 {
     filter_t filter = {0};
 
     filter.set = filter_cfg->set;
+    filter.stats_idx = stats_idx;
 
     // Disabled filters are written too (enabled = 0); the XDP program skips them, so they keep their slot.
     filter.enabled = (filter_cfg->enabled != 0) ? 1 : 0;
+
+    // Shadow filters only count their matches.
+    filter.shadow = (filter_cfg->shadow > 0) ? 1 : 0;
 
     if (filter_cfg->log > -1)
     {
@@ -315,7 +319,7 @@ int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
 
         if (!range.success)
         {
-            fprintf(stderr, "[WARNING] Invalid source IPv6 address '%s' for filter #%d...\n", filter_cfg->ip.src_ip6, idx + 1);
+            fprintf(stderr, "[WARNING] Invalid source IPv6 address '%s' for filter #%u...\n", filter_cfg->ip.src_ip6, (key % MAX_FILTERS) + 1);
         }
         else
         {
@@ -332,7 +336,7 @@ int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
 
         if (!range.success)
         {
-            fprintf(stderr, "[WARNING] Invalid destination IPv6 address '%s' for filter #%d...\n", filter_cfg->ip.dst_ip6, idx + 1);
+            fprintf(stderr, "[WARNING] Invalid destination IPv6 address '%s' for filter #%u...\n", filter_cfg->ip.dst_ip6, (key % MAX_FILTERS) + 1);
         }
         else
         {
@@ -508,29 +512,38 @@ int update_filter(int map_filters, filter_rule_cfg_t* filter_cfg, int idx)
         filter.icmp.type = filter_cfg->icmp.type;
     }
 
-    filter_t filter_cpus[MAX_CPUS];
-    memset(filter_cpus, 0, sizeof(filter_cpus));
-
-    for (int j = 0; j < MAX_CPUS; j++)
-    {
-        filter_cpus[j] = filter;
-    }
-
-    return bpf_map_update_elem(map_filters, &idx, &filter_cpus, BPF_ANY);
+    return bpf_map_update_elem(map_filters, &key, &filter, BPF_ANY);
 }
 
 /**
  * Updates the filter's BPF map with current config settings.
+ * The filters are written to the inactive buffer of map_filters, map_filter_active is flipped to it with one write, then the old buffer is cleared.
+ * A packet therefore sees either the old filters or the new ones, never a mix.
  * 
  * @param map_filters The filter's BPF map FD.
+ * @param map_filter_active The active buffer BPF map FD (map_filter_active), or -1 to write buffer 0 in place.
  * @param cfg A pointer to the config structure.
  * 
  * @return Void
  */
-void update_filters(int map_filters, config__t *cfg)
+void update_filters(int map_filters, int map_filter_active, config__t *cfg)
 {
     int ret;
     int cur_idx = 0;
+
+    u32 active_key = 0;
+    u32 active = 0;
+
+    if (map_filter_active > -1 && bpf_map_lookup_elem(map_filter_active, &active_key, &active) != 0)
+    {
+        active = 0;
+    }
+
+    active &= 1;
+
+    // Write the inactive buffer (or buffer 0 in place without map_filter_active).
+    u32 next = (map_filter_active > -1) ? (active ^ 1) : 0;
+    u32 base = next * MAX_FILTERS;
 
     // Add a filter to the filter maps.
     // Set filters are written to consecutive slots (unset config entries are skipped, since the XDP program stops at the first unset slot).
@@ -544,8 +557,8 @@ void update_filters(int map_filters, config__t *cfg)
             continue;
         }
 
-        // Attempt to update filter.
-        if ((ret = update_filter(map_filters, filter, cur_idx)) != 0)
+        // Attempt to update filter (counters by slot: the loader does not keep them across reloads that reorder its config).
+        if ((ret = update_filter(map_filters, filter, base + cur_idx, cur_idx)) != 0)
         {
             fprintf(stderr, "[WARNING] Failed to update filter #%d due to BPF update error (%d)...\n", cur_idx, ret);
 
@@ -558,7 +571,25 @@ void update_filters(int map_filters, config__t *cfg)
     // Clear the remaining slots so rules removed from the config don't linger.
     for (int i = cur_idx; i < MAX_FILTERS; i++)
     {
-        delete_filter(map_filters, i);
+        delete_filter(map_filters, base + i);
+    }
+
+    if (map_filter_active < 0)
+    {
+        return;
+    }
+
+    // Flip to the new buffer, then clear the old one.
+    if ((ret = bpf_map_update_elem(map_filter_active, &active_key, &next, BPF_ANY)) != 0)
+    {
+        fprintf(stderr, "[WARNING] Failed to switch to the new filters due to BPF update error (%d)...\n", ret);
+
+        return;
+    }
+
+    for (int i = 0; i < MAX_FILTERS; i++)
+    {
+        delete_filter(map_filters, active * MAX_FILTERS + i);
     }
 }
 

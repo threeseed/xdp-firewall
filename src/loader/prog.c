@@ -46,8 +46,19 @@ static const char* pinned_maps[] =
 #endif
 #endif
 
+#ifdef ENABLE_SANITY
+    "map_sanity",
+    "map_sanity_stats",
+    "map_port_gate",
+    "map_local_addr",
+#ifdef ENABLE_IPV6
+    "map_local_addr6",
+#endif
+#endif
+
 #ifdef ENABLE_FILTERS
     "map_filters",
+    "map_filter_active",
     "map_filter_stats",
 #ifdef ENABLE_FILTER_LOGGING
     "map_filter_log",
@@ -102,6 +113,51 @@ static void pin_needed_maps(config__t* cfg, struct bpf_object* obj)
         {
             log_msg(cfg, 3, 0, "BPF map '%s' pinned to '%s/%s'.", name, XDP_MAP_PIN_DIR, name);
         }
+    }
+}
+
+// Where the XDP program is pinned (next to the maps) when pin_maps is on, so another process can read its run-time stats (run_time_ns/run_cnt) by path with only CAP_BPF.
+#define XDP_PROG_PIN_NAME "xdp_prog"
+
+/**
+ * Pins the XDP program to the file system (XDP_MAP_PIN_DIR/XDP_PROG_PIN_NAME), replacing a stale pin.
+ *
+ * @param cfg A pointer to the config structure.
+ * @param prog A pointer to the XDP program.
+ */
+static void pin_prog(config__t* cfg, struct xdp_program* prog)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", XDP_MAP_PIN_DIR, XDP_PROG_PIN_NAME);
+
+    // A pin left behind by an earlier run.
+    unlink(path);
+
+    int ret;
+
+    if ((ret = bpf_obj_pin(xdp_program__fd(prog), path)) != 0)
+    {
+        log_msg(cfg, 1, 0, "[WARNING] Failed to pin the XDP program to '%s' (%d)...", path, ret);
+    }
+    else
+    {
+        log_msg(cfg, 3, 0, "XDP program pinned to '%s'.", path);
+    }
+}
+
+/**
+ * Removes the XDP program's pin (see pin_prog()).
+ *
+ * @param cfg A pointer to the config structure.
+ */
+static void unpin_prog(config__t* cfg)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", XDP_MAP_PIN_DIR, XDP_PROG_PIN_NAME);
+
+    if (unlink(path) != 0)
+    {
+        log_msg(cfg, 1, 0, "[WARNING] Failed to un-pin the XDP program from '%s'.", path);
     }
 }
 
@@ -291,6 +347,15 @@ int main(int argc, char *argv[])
 
     log_msg(&cfg, 3, 0, "map_filters FD => %d.", map_filters);
 
+    int map_filter_active = get_map_fd(prog, "map_filter_active");
+
+    if (map_filter_active < 0)
+    {
+        log_msg(&cfg, 0, 1, "[ERROR] Failed to find 'map_filter_active' BPF map.\n");
+
+        return EXIT_FAILURE;
+    }
+
 #ifdef ENABLE_FILTER_LOGGING
     int map_filter_log = get_map_fd(prog, "map_filter_log");
 
@@ -384,13 +449,15 @@ int main(int argc, char *argv[])
         unpin_needed_maps(&cfg, obj, 1);
 
         pin_needed_maps(&cfg, obj);
+
+        pin_prog(&cfg, prog);
     }
 
 #ifdef ENABLE_FILTERS
     log_msg(&cfg, 2, 0, "Updating filters...");
 
     // Update filters.
-    update_filters(map_filters, &cfg);
+    update_filters(map_filters, map_filter_active, &cfg);
 #endif
 
 #ifdef ENABLE_IP_RANGE_DROP
@@ -479,7 +546,7 @@ int main(int argc, char *argv[])
 
 #ifdef ENABLE_FILTERS
                     // Update filters.
-                    update_filters(map_filters, &cfg);
+                    update_filters(map_filters, map_filter_active, &cfg);
 #endif
                 }
 
@@ -544,6 +611,8 @@ int main(int argc, char *argv[])
         struct bpf_object* obj = get_bpf_obj(prog);
 
         unpin_needed_maps(&cfg, obj, 0);
+
+        unpin_prog(&cfg);
     }
 
     // Lastly, close the XDP program.

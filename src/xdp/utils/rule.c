@@ -4,7 +4,7 @@
 /**
  * Processes a filter rule.
  * 
- * @param idx The rule index.
+ * @param idx The rule's slot in the active map_filters buffer.
  * @param data A pointer to the rule context.
  * 
  * @return 1 to break the loop or 0 to continue.
@@ -13,7 +13,10 @@ static __always_inline long process_rule(u32 idx, void* data)
 {
     rule_ctx_t* ctx = data;
 
-    filter_t *filter = bpf_map_lookup_elem(&map_filters, &idx);
+    // Slot idx of the active buffer.
+    u32 key = ctx->base + idx;
+
+    filter_t *filter = bpf_map_lookup_elem(&map_filters, &key);
 
     if (!filter || !filter->set)
     {
@@ -302,8 +305,21 @@ static __always_inline long process_rule(u32 idx, void* data)
         }
     }
 
-    // Per-filter counters (every filter, logged or not).
-    filter_stats_t *fstats = bpf_map_lookup_elem(&map_filter_stats, &idx);
+    // Per-filter counters (every filter, logged or not), at the filter's own stats index so they follow it across slots and buffers.
+    u32 stats_idx = filter->stats_idx;
+    filter_stats_t *fstats = bpf_map_lookup_elem(&map_filter_stats, &stats_idx);
+
+    // A shadow filter only counts: evaluation continues with the next filter as if this one had not matched.
+    if (filter->shadow)
+    {
+        if (fstats)
+        {
+            fstats->shadow_packets++;
+            fstats->shadow_bytes += ctx->pkt_len;
+        }
+
+        return 0;
+    }
 
     if (fstats)
     {

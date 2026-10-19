@@ -118,6 +118,11 @@ struct filter
     unsigned int log : 1;
     unsigned int enabled : 1;
 
+    // Shadow (dry-run) filter: a match is counted in map_filter_stats (shadow_packets/shadow_bytes) and evaluation continues with the next filter as if this one had not matched.
+    // A shadow filter never drops, passes, blocks or logs. Rate limit state is per source/flow (not per filter), so it is updated the same way as for an enforced filter.
+    // Sits in what was padding after enabled, so no older field moves.
+    unsigned int shadow : 1;
+
     u8 action;
     u16 block_time;
 
@@ -142,6 +147,10 @@ struct filter
     filter_tcp_t tcp;
     filter_udp_t udp;
     filter_icmp_t icmp;
+
+    // The map_filter_stats index this filter counts into (0 to MAX_FILTER_STATS - 1).
+    // Chosen by whoever writes the filter, so a filter keeps its counters when it moves to another slot or to the other buffer of map_filters.
+    u32 stats_idx;
 } __attribute__((__aligned__(8))) typedef filter_t;
 
 // Global packet counters (map_stats, per-CPU, single entry at key 0).
@@ -178,13 +187,89 @@ struct stats
     u64 filter_log_lost;
 } typedef stats_t;
 
-// Per-filter counters (map_filter_stats, per-CPU array indexed by filter slot).
+// Per-filter counters (map_filter_stats, per-CPU array indexed by filter_t's stats_idx).
 // Incremented for every packet that matches the filter, whether or not the filter logs.
 struct filter_stats
 {
+    // Matches of the filter while it was enforced (its action was taken).
     u64 packets;
     u64 bytes;
+
+    // Matches of the filter while it was a shadow filter (nothing was done; evaluation continued).
+    u64 shadow_packets;
+    u64 shadow_bytes;
 } typedef filter_stats_t;
+
+// Built-in L3/L4 sanity checks (map_sanity, map_sanity_stats).
+// Each reason has a mode (SANITY_MODE_*) in sanity_cfg_t and counters in map_sanity_stats at the reason's index.
+#define SANITY_MODE_OFF 0
+#define SANITY_MODE_SHADOW 1
+#define SANITY_MODE_ENFORCE 2
+
+// Source address is martian: IPv4 0/8, 127/8, 224/4 or 240/4 (incl. 255.255.255.255); IPv6 ::, ::1 or ff00::/8.
+#define SANITY_MARTIAN_SRC 0
+
+// Source address is one of the host's own addresses (map_local_addr/map_local_addr6).
+#define SANITY_LAND 1
+
+// TCP with no flags set (flags & 0x3F == 0).
+#define SANITY_TCP_NULL 2
+
+// TCP with SYN and FIN set.
+#define SANITY_TCP_SYN_FIN 3
+
+// TCP with FIN, PSH and URG set (Xmas scan).
+#define SANITY_TCP_XMAS 4
+
+// TCP data offset below 5 (header shorter than 20 bytes).
+#define SANITY_TCP_BAD_DOFF 5
+
+// TCP or UDP source or destination port 0.
+#define SANITY_PORT_ZERO 6
+
+// TCP SYN without ACK to a port not in the TCP port gate.
+#define SANITY_PORT_GATE_TCP 7
+
+// UDP to a port not in the UDP port gate (DHCP client port 68 excepted).
+#define SANITY_PORT_GATE_UDP 8
+
+// Room for reasons (sanity_cfg_t's mode array and map_sanity_stats' entries); reasons may be added below this without a layout change.
+#define SANITY_REASONS 16
+
+// Sanity check modes (map_sanity, array, single entry at key 0). A zeroed entry turns every check off.
+struct sanity_cfg
+{
+    u8 mode[SANITY_REASONS];
+} typedef sanity_cfg_t;
+
+// Per-reason sanity counters (map_sanity_stats, per-CPU array indexed by SANITY_*).
+struct sanity_stats
+{
+    // Packets the reason dropped (mode enforce).
+    u64 dropped;
+    u64 dropped_bytes;
+
+    // Packets the reason would have dropped (mode shadow); they were passed on to the rest of the program.
+    u64 would_drop;
+    u64 would_drop_bytes;
+} typedef sanity_stats_t;
+
+// Port gate keys (map_port_gate).
+#define PORT_GATE_TCP 0
+#define PORT_GATE_UDP 1
+
+// The DHCP client port, always let through by the UDP port gate (replies from a DHCP server).
+#define PORT_GATE_DHCP_CLIENT 68
+
+// A stateless port gate (map_port_gate, array with an entry per PORT_GATE_* key).
+// Bit (port & 63) of bits[port >> 6] is set for every allowed destination port.
+// enabled is 0 for an empty or unset gate, which lets everything through (the gate is off).
+struct port_gate
+{
+    u32 enabled;
+    u32 reserved;
+    u64 bits[1024];
+} typedef port_gate_t;
 
 struct cl_stats
 {
